@@ -1,13 +1,8 @@
 import os
 import argparse
-
 import torch
 from torch.cuda.amp import autocast
-import numpy as np
-from PIL import Image
-
 from scripts.demo.streamlit_helpers import *
-from sgm.modules.diffusionmodules.sampling import EulerAncestralSampler
 
 VERSION2SPECS = {
     "SDXL-Turbo": {
@@ -49,6 +44,10 @@ class SubstepSampler(EulerAncestralSampler):
         num_sigmas = len(sigmas)
         s_in = x.new_ones([x.shape[0]])
         return x, s_in, sigmas, num_sigmas, cond, uc
+
+
+def load_model(model):
+    model.cuda()
 
 
 def seeded_randn(shape, seed):
@@ -159,6 +158,58 @@ def sample(
             )
     return samples
 
+# Streamlit removal for easy debug
+def load_model_from_config(config, ckpt=None, verbose=True):
+    """an implementation without Streamlit"""
+    model = instantiate_from_config(config.model)
+    msg = None
+    if ckpt is not None:
+        print(f"Loading model from {ckpt}")
+        if ckpt.endswith("ckpt"):
+            pl_sd = torch.load(ckpt, map_location="cpu")
+            if "global_step" in pl_sd:
+                global_step = pl_sd["global_step"]
+                print(f"Loaded checkpoint from global step {global_step}")
+            sd = pl_sd["state_dict"]
+        elif ckpt.endswith("safetensors"):
+            sd = load_safetensors(ckpt)
+        else:
+            raise NotImplementedError("Checkpoint file format not supported.")
+
+        m, u = model.load_state_dict(sd, strict=False)
+
+        if len(m) > 0 and verbose:
+            print("Missing keys in state dict:")
+            print(m)
+        if len(u) > 0 and verbose:
+            print("Unexpected keys in state dict:")
+            print(u)
+    else:
+        msg = "No checkpoint provided, initializing model from scratch."
+
+    model = initial_model_load(model)
+    model.eval()
+
+    return model, msg
+
+
+def init_without_st(version_dict, load_ckpt=True, load_filter=True):
+    state = dict()
+    if not "model" in state:
+        config = version_dict["config"]
+        ckpt = version_dict["ckpt"]
+
+        config = OmegaConf.load(config)
+        model, msg = load_model_from_config(config, ckpt if load_ckpt else None)
+
+        state["msg"] = msg
+        state["model"] = model
+        state["ckpt"] = ckpt if load_ckpt else None
+        state["config"] = config
+        if load_filter:
+            state["filter"] = DeepFloydDataFiltering(verbose=False)
+    return state
+
 
 if __name__ == "__main__":
     # parse argument
@@ -166,7 +217,7 @@ if __name__ == "__main__":
     parser.add_argument("--version", type=str, default="SDXL-Turbo", choices=["SDXL-Turbo", "SD-Turbo"],
                         help="Model version to use.")
     parser.add_argument("--n_steps", type=int, default=4, help="Number of sampling steps.")
-    parser.add_argument("--seed", type=int, default=1234, help="Seed for random number generation.")
+    parser.add_argument("--seed", type=int, default=42, help="Seed for random number generation.")
     parser.add_argument("--prompt", type=str,
                         default="A cinematic shot of a baby racoon wearing an intricate Italian priest robe.",
                         help="Prompt for the model.")
@@ -175,69 +226,25 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     version_dict = VERSION2SPECS[args.version]
-
-    st.title("Turbo")
-
-    head_cols = st.columns([1, 1, 1])
-    with head_cols[0]:
-        version = st.selectbox("Model Version", list(VERSION2SPECS.keys()), 0)
-        version_dict = VERSION2SPECS[version]
-
-    with head_cols[1]:
-        v_spacer(2)
-        if st.checkbox("Load Model"):
-            mode = "txt2img"
-        else:
-            mode = "skip"
-
-    if mode != "skip":
-        state = init_st(version_dict, load_filter=True)
-        if state["msg"]:
-            st.info(state["msg"])
-        model = state["model"]
-        load_model(model)
-
-    # seed
-    if "seed" not in st.session_state:
-        st.session_state.seed = 0
-
-
-    def increment_counter():
-        st.session_state.seed += 1
-
-
-    def decrement_counter():
-        if st.session_state.seed > 0:
-            st.session_state.seed -= 1
-
-
-    with head_cols[2]:
-        n_steps = st.number_input(label="number of steps", min_value=1, max_value=4)
+    state = init_without_st(version_dict, load_ckpt=True, load_filter=True)
+    if state["msg"]:
+        print(state["msg"])
+    model = state["model"]
+    load_model(model)
 
     sampler = SubstepSampler(
-        n_sample_steps=1,
+        n_sample_steps=args.n_steps,
         num_steps=1000,
         eta=1.0,
         discretization_config=dict(
             target="sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization"
         ),
     )
-    sampler.n_sample_steps = n_steps
-    default_prompt = "A cinematic shot of a baby racoon wearing an intricate italian priest robe."
-    prompt = st_keyup("Enter a value", value=default_prompt, debounce=300, key="interactive_text")
 
-    cols = st.columns([1, 5, 1])
-    if mode != "skip":
-        with cols[0]:
-            v_spacer(14)
-            st.button("↩", on_click=decrement_counter)
-        with cols[2]:
-            v_spacer(14)
-            st.button("↪", on_click=increment_counter)
+    sampler.noise_sampler = SeededNoise(seed=args.seed)
+    out = sample(
+        model, sampler, H=512, W=512, seed=args.seed, prompt=args.prompt, filter=state.get("filter")
+    )
 
-        sampler.noise_sampler = SeededNoise(seed=st.session_state.seed)
-        out = sample(
-            model, sampler, H=512, W=512, seed=st.session_state.seed, prompt=prompt, filter=state.get("filter")
-        )
-        with cols[1]:
-            st.image(out[0])
+    Image.fromarray(out[0]).save(args.output)
+    print(f"Image saved to {args.output}")
