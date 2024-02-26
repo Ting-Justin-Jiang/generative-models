@@ -1,6 +1,7 @@
 import os
 import argparse
 import torch
+import tomesd
 from torch.cuda.amp import autocast
 from scripts.demo.streamlit_helpers import *
 
@@ -158,7 +159,9 @@ def sample(
             )
     return samples
 
+#####################################################################################
 # Streamlit removal for easy debug
+#####################################################################################
 def load_model_from_config(config, ckpt=None, verbose=True):
     """an implementation without Streamlit"""
     model = instantiate_from_config(config.model)
@@ -201,6 +204,9 @@ def init_without_st(version_dict, load_ckpt=True, load_filter=True):
 
         config = OmegaConf.load(config)
         model, msg = load_model_from_config(config, ckpt if load_ckpt else None)
+
+        """Apply Tome-sd"""
+        tomesd.apply_patch(model, ratio=0.5)
 
         state["msg"] = msg
         state["model"] = model
