@@ -255,25 +255,32 @@ def init_and_sampling(version_dict, sampler, seed, prompt, iterations, tome_rati
 
 
 def images_to_grid(images, grid_size=None, save_path="output_grid.png"):
+    """
+    Convert a list of images to a grid and save to a file.
+
+    Parameters:
+    - images: List of numpy arrays representing images.
+    - grid_size: Tuple of (rows, cols) for the grid. If None, will be determined automatically.
+    - save_path: Path to save the output image grid.
+    """
     if grid_size is None:
         grid_cols = int(math.ceil(math.sqrt(len(images))))
         grid_rows = int(math.ceil(len(images) / grid_cols))
     else:
         grid_rows, grid_cols = grid_size
 
-    # Assuming all images are the same size and removing the batch dimension
     img_height, img_width = images[0].shape[1:3]
     grid_img = Image.new('RGB', size=(img_width * grid_cols, img_height * grid_rows))
 
     for index, img in enumerate(images):
         row = index // grid_cols
         col = index % grid_cols
-        # Reshape or select the slice to remove the batch dimension
-        img_pil = Image.fromarray(img[0])  # This selects the first (and only) image in the batch
+
+        img_pil = Image.fromarray(img[0])
         grid_img.paste(img_pil, box=(col * img_width, row * img_height))
 
     grid_img.save(save_path)
-    # grid_img.show()  # Optionally display the grid
+    # grid_img.show()
 
 def save_samples_in_grids(samples):
     for tome_ratio, images_list in samples.items():
