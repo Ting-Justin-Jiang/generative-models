@@ -3,8 +3,12 @@ import argparse
 import torch
 import tomesd
 from torch.cuda.amp import autocast
+from torch.profiler import profile, record_function, ProfilerActivity
 from scripts.demo.streamlit_helpers import *
 
+#####################################################################################
+# helper functions from original turbo demo
+#####################################################################################
 VERSION2SPECS = {
     "SDXL-Turbo": {
         "H": 512,
@@ -97,7 +101,9 @@ def init_embedder_options(keys, init_dict, prompt=None, negative_prompt=None):
 
     return value_dict
 
-
+#####################################################################################
+# remove streamlit for easy debugging
+#####################################################################################
 def sample(
         model,
         sampler,
@@ -107,6 +113,7 @@ def sample(
         seed=0,
         filter=None,
 ):
+    """sampling function with torch profiling"""
     F = 8
     C = 4
     shape = (1, C, H // F, W // F)
@@ -127,57 +134,64 @@ def sample(
     precision_scope = autocast
     with torch.no_grad():
         with precision_scope("cuda"):
-            batch, batch_uc = get_batch(
-                get_unique_embedder_keys_from_conditioner(model.conditioner),
-                value_dict,
-                [1],
-            )
-            c = model.conditioner(batch)
-            uc = None
-            randn = seeded_randn(shape, seed)
+            # start profile
+            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                         record_shapes=True,
+                         profile_memory=True,
+                         with_stack=True) as prof:
+                with record_function("model_inference"):
+                    batch, batch_uc = get_batch(
+                        get_unique_embedder_keys_from_conditioner(model.conditioner),
+                        value_dict,
+                        [1],
+                    )
+                    c = model.conditioner(batch)
+                    uc = None
+                    randn = seeded_randn(shape, seed)
 
-            def denoiser(input, sigma, c):
-                return model.denoiser(
-                    model.model,
-                    input,
-                    sigma,
-                    c,
-                )
+                    def denoiser(input, sigma, c):
+                        return model.denoiser(
+                            model.model,
+                            input,
+                            sigma,
+                            c,
+                        )
 
-            samples_z = sampler(denoiser, randn, cond=c, uc=uc)
-            samples_x = model.decode_first_stage(samples_z)
-            samples = torch.clamp((samples_x + 1.0) / 2.0, min=0.0, max=1.0)
-            if filter is not None:
-                samples = filter(samples)
-            samples = (
-                (255 * samples)
-                .to(dtype=torch.uint8)
-                .permute(0, 2, 3, 1)
-                .detach()
-                .cpu()
-                .numpy()
-            )
+                    samples_z = sampler(denoiser, randn, cond=c, uc=uc)
+                    samples_x = model.decode_first_stage(samples_z)
+                    samples = torch.clamp((samples_x + 1.0) / 2.0, min=0.0, max=1.0)
+                    if filter is not None:
+                        samples = filter(samples)
+                    samples = (
+                        (255 * samples)
+                        .to(dtype=torch.uint8)
+                        .permute(0, 2, 3, 1)
+                        .detach()
+                        .cpu()
+                        .numpy()
+                    )
+            print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
     return samples
 
-#####################################################################################
-# Streamlit removal for easy debug
-#####################################################################################
+
 def load_model_from_config(config, ckpt=None, verbose=True):
     """an implementation without Streamlit"""
     model = instantiate_from_config(config.model)
-    msg = None
     if ckpt is not None:
         print(f"Loading model from {ckpt}")
         if ckpt.endswith("ckpt"):
             pl_sd = torch.load(ckpt, map_location="cpu")
             if "global_step" in pl_sd:
                 global_step = pl_sd["global_step"]
-                print(f"Loaded checkpoint from global step {global_step}")
+                st.info(f"loaded ckpt from global step {global_step}")
+                print(f"Global Step: {pl_sd['global_step']}")
             sd = pl_sd["state_dict"]
         elif ckpt.endswith("safetensors"):
             sd = load_safetensors(ckpt)
         else:
             raise NotImplementedError("Checkpoint file format not supported.")
+
+        msg = None
 
         m, u = model.load_state_dict(sd, strict=False)
 
@@ -188,15 +202,14 @@ def load_model_from_config(config, ckpt=None, verbose=True):
             print("Unexpected keys in state dict:")
             print(u)
     else:
-        msg = "No checkpoint provided, initializing model from scratch."
+        msg = None
 
     model = initial_model_load(model)
     model.eval()
-
     return model, msg
 
 
-def init_without_st(version_dict, load_ckpt=True, load_filter=True):
+def init_without_st(version_dict, load_ckpt=True, load_filter=True, token_merging=True):
     state = dict()
     if not "model" in state:
         config = version_dict["config"]
@@ -205,8 +218,9 @@ def init_without_st(version_dict, load_ckpt=True, load_filter=True):
         config = OmegaConf.load(config)
         model, msg = load_model_from_config(config, ckpt if load_ckpt else None)
 
-        """Apply Tome-sd"""
-        tomesd.apply_patch(model, ratio=0.5)
+        #TODO Token merging doesn't really work here
+        if token_merging:
+            tomesd.apply_patch(model, ratio=0.5)
 
         state["msg"] = msg
         state["model"] = model
@@ -217,22 +231,25 @@ def init_without_st(version_dict, load_ckpt=True, load_filter=True):
     return state
 
 
-if __name__ == "__main__":
-    # parse argument
-    parser = argparse.ArgumentParser(description="Run the model without Streamlit.")
-    parser.add_argument("--version", type=str, default="SDXL-Turbo", choices=["SDXL-Turbo", "SD-Turbo"],
-                        help="Model version to use.")
+def main():
+    parser = argparse.ArgumentParser(description="Generate images with Stable Diffusion Turbo.")
+    parser.add_argument("--version", choices=VERSION2SPECS.keys(), default="SDXL-Turbo", help="Model version to use.")
     parser.add_argument("--n_steps", type=int, default=4, help="Number of sampling steps.")
     parser.add_argument("--seed", type=int, default=42, help="Seed for random number generation.")
-    parser.add_argument("--prompt", type=str,
+    parser.add_argument("--prompt",
                         default="A cinematic shot of a baby racoon wearing an intricate Italian priest robe.",
                         help="Prompt for the model.")
-    parser.add_argument("--output", type=str, default="output_image.png", help="Output image path.")
-    parser.add_argument("--iterations", type=int, default=1, help="Number of images to generate.")
+    parser.add_argument("--output", default="output_image.png", help="Output image path.")
+    parser.add_argument("--tome", action=argparse.BooleanOptionalAction, help="Token merging")
     args = parser.parse_args()
 
     version_dict = VERSION2SPECS[args.version]
-    state = init_without_st(version_dict, load_ckpt=True, load_filter=True)
+    if args.tome:
+        print("Initializing the state WITH Token Merging")
+    else:
+        print("Initializing the state WITHOUT Token Merging")
+    state = init_without_st(version_dict, load_ckpt=True, load_filter=True, token_merging=args.tome)
+
     if state["msg"]:
         print(state["msg"])
     model = state["model"]
@@ -254,3 +271,7 @@ if __name__ == "__main__":
 
     Image.fromarray(out[0]).save(args.output)
     print(f"Image saved to {args.output}")
+
+
+if __name__ == "__main__":
+    main()
