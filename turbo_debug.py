@@ -6,6 +6,7 @@ import tomesd
 from collections import defaultdict
 from torch.cuda.amp import autocast
 from scripts.demo.streamlit_helpers import *
+from diffusers import AutoPipelineForText2Image
 from prompting import PROMPT
 
 #####################################################################################
@@ -182,7 +183,7 @@ def profile_sampling(model, sampler, seed, prompt, iterations, filter=None):
         single_prompt = prompt[i]
         samples = sample(model, sampler, H=512, W=512, seed=seed, prompt=single_prompt, filter=filter)
         total_samples.append(samples)
-    total_runtime = (time.time() - start) / iterations
+    total_runtime = (time.time() - start)
 
     return total_samples, total_runtime
 
@@ -254,41 +255,67 @@ def init_and_sampling(version_dict, sampler, seed, prompt, iterations, tome_rati
     return samples, total_runtime
 
 
-def images_to_grid(images, grid_size=None, save_path="output_grid.png"):
-    """
-    Convert a list of images to a grid and save to a file.
+def init_and_sampling_diffuser(n_steps, prompt, iterations, tome_ratio=0):
+    pipe = AutoPipelineForText2Image.from_pretrained("stabilityai/sdxl-turbo",
+                                                     height=512, width=512,
+                                                     torch_dtype=torch.float32).to("cuda")
+    if tome_ratio > 0:
+        pipe = tomesd.apply_patch(pipe, ratio=tome_ratio)
+    pipe.set_progress_bar_config(disable=True)
 
-    Parameters:
-    - images: List of numpy arrays representing images.
-    - grid_size: Tuple of (rows, cols) for the grid. If None, will be determined automatically.
-    - save_path: Path to save the output image grid.
-    """
+    total_samples = []
+    start = time.time()
+    for i in range(iterations):
+        single_prompt = prompt[i]
+        image = pipe(prompt=single_prompt, num_inference_steps=n_steps, guidance_scale=0.0).images
+        total_samples.append(image)
+    total_runtime = (time.time() - start)
+
+    return total_samples, total_runtime
+
+
+def preprocess_samples(samples):
+    processed_samples = {}
+    for tome_ratio, image_arrays in samples.items():
+        images_list = [[Image.fromarray(img_array.squeeze())] for img_array in image_arrays]
+        processed_samples[tome_ratio] = images_list
+    return processed_samples
+
+
+def images_to_grid(images, grid_size=None, save_path="output_grid.png"):
+    # Flatten the list of lists to get a simple list of images
+    flat_images = [img[0] for img in images]
+
     if grid_size is None:
-        grid_cols = int(math.ceil(math.sqrt(len(images))))
-        grid_rows = int(math.ceil(len(images) / grid_cols))
+        grid_cols = int(math.ceil(math.sqrt(len(flat_images))))
+        grid_rows = int(math.ceil(len(flat_images) / grid_cols))
     else:
         grid_rows, grid_cols = grid_size
 
-    img_height, img_width = images[0].shape[1:3]
+    img_width, img_height = flat_images[0].size
     grid_img = Image.new('RGB', size=(img_width * grid_cols, img_height * grid_rows))
 
-    for index, img in enumerate(images):
+    for index, img in enumerate(flat_images):
         row = index // grid_cols
         col = index % grid_cols
-
-        img_pil = Image.fromarray(img[0])
-        grid_img.paste(img_pil, box=(col * img_width, row * img_height))
+        grid_img.paste(img, box=(col * img_width, row * img_height))
 
     grid_img.save(save_path)
-    # grid_img.show()
+    print(f"Grid image saved at {save_path}")
 
-def save_samples_in_grids(samples):
+
+def save_samples_in_grids(samples, diffuser):
+    """
+    Save images in samples dictionary to grid images.
+
+    Parameters:
+    - samples: A dictionary with tome ratios as keys and lists of PIL Images as values.
+    """
     for tome_ratio, images_list in samples.items():
-        # Flatten the list of image information to a list of numpy arrays
-        images = [img_info for img_info in images_list]
-        save_path = f"output_images_grid_tome_{tome_ratio}.png"
-        images_to_grid(images, save_path=save_path)
+        save_path = f"output_images_grid_tome_{tome_ratio}_diffuser_{diffuser}.png"
+        images_to_grid(images_list, save_path=save_path)
         print(f"Saved images grid for ToMe ratio {tome_ratio} at: {save_path}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Generate images with Stable Diffusion Turbo.")
@@ -296,25 +323,42 @@ def main():
     parser.add_argument("--n_steps", type=int, default=4, help="Number of sampling steps.")
     parser.add_argument("--seed", type=int, default=0, help="Seed for random number generation.")
     parser.add_argument("--output", default="output_image.png", help="Output image path.")
+    parser.add_argument("--diffuser", action=argparse.BooleanOptionalAction, help="Use Huggingface diffuser")
     args = parser.parse_args()
-
-    version_dict = VERSION2SPECS[args.version]
-    sampler = SubstepSampler(n_sample_steps=args.n_steps, num_steps=1000, eta=1.0, discretization_config=dict(
-        target="sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization"))
-    sampler.noise_sampler = SeededNoise(seed=args.seed)
-    prompts = PROMPT
 
     def ddict():
         return defaultdict(ddict)
     runtimes = ddict()
     samples = ddict()
 
-    for tome_ratio in [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]:
-        print(f"\tToMe ratio: {tome_ratio}")
-        samples[tome_ratio], runtimes[tome_ratio] = init_and_sampling(
-             version_dict, sampler, args.seed, prompts, len(prompts), tome_ratio=tome_ratio
-        )
-        print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
+    # Use model source code
+    if args.diffuser is None:
+        version_dict = VERSION2SPECS[args.version]
+        sampler = SubstepSampler(n_sample_steps=args.n_steps, num_steps=1000, eta=1.0, discretization_config=dict(
+            target="sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization"))
+        sampler.noise_sampler = SeededNoise(seed=args.seed)
+        prompts = PROMPT
+
+        for tome_ratio in [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]:
+            print(f"\tToMe ratio: {tome_ratio}")
+            samples[tome_ratio], runtimes[tome_ratio] = init_and_sampling(
+                 version_dict, sampler, args.seed, prompts, len(prompts), tome_ratio=tome_ratio
+            )
+            print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
+        samples = preprocess_samples(samples)
+
+
+    # Use Diffuser
+    elif args.diffuser:
+        prompts = PROMPT
+        # tome loop
+        for tome_ratio in [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]:
+            print(f"\tToMe ratio: {tome_ratio}")
+            samples[tome_ratio], runtimes[tome_ratio] = init_and_sampling_diffuser(
+                args.n_steps, prompts, len(prompts), tome_ratio=tome_ratio
+            )
+            print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
+
 
     ## Print Results
     for tome_ratio, runtime in runtimes.items():
@@ -323,11 +367,7 @@ def main():
         print(
             f"ToMe ratio: {tome_ratio:.1f} -- runtime reduction: {time_perc:5.2f}%")
 
-    save_samples_in_grids(samples)
-
-def diffuser_main():
-    # TODO: a alternate main method with diffusers
-    ...
+    save_samples_in_grids(samples, diffuser=args.diffuser)
 
 if __name__ == "__main__":
     main()
