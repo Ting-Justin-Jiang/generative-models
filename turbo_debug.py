@@ -2,9 +2,10 @@ import os
 import argparse
 import torch
 import time
-import tomesd
+import turbo_tome as tomesd
 from collections import defaultdict
 from torch.cuda.amp import autocast
+from torch.profiler import profile, record_function, ProfilerActivity
 from scripts.demo.streamlit_helpers import *
 from diffusers import AutoPipelineForText2Image
 from prompting import PROMPT
@@ -115,6 +116,7 @@ def sample(
         W=1024,
         seed=0,
         filter=None,
+        profile_visible=False
 ):
     """
     sampling function with torch profiling
@@ -156,8 +158,25 @@ def sample(
                     c,
                 )
 
-            samples_z = sampler(denoiser, randn, cond=c, uc=uc)
-            samples_x = model.decode_first_stage(samples_z)
+            # torch profile On/Off
+            if profile_visible:
+                with profile(activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ]) as prof:
+
+                    with record_function("0Model: Model_Sampling"):
+                        samples_z = sampler(denoiser, randn, cond=c, uc=uc)
+
+                    with record_function("0Model: VAE_Decoder"):
+                        samples_x = model.decode_first_stage(samples_z)
+            else:
+                samples_z = sampler(denoiser, randn, cond=c, uc=uc)
+                samples_x = model.decode_first_stage(samples_z)
+
+            if profile_visible:
+                print(prof.key_averages().table(sort_by="cuda_time_total"))
+
             samples = torch.clamp((samples_x + 1.0) / 2.0, min=0.0, max=1.0)
             if filter is not None:
                 samples = filter(samples)
@@ -172,19 +191,38 @@ def sample(
     return samples
 
 
-def profile_sampling(model, sampler, seed, prompt, iterations, filter=None):
+def profile_sampling(model, sampler, seed, prompt, iterations, filter=None, profile_visible=False):
     """
     profile multiple sampling processes
+
+    profile_visible: if profiling is on, inference the model for only one prompt and record profiling result
     """
     total_samples = []
     start = time.time()
+    #
+    if profile_visible:
+        # TODO check the "warm-up" issue in SDXL Turbo
+        iterations = 2
+        last_inference = False
+        for i in range(iterations):
 
-    for i in range(iterations):
-        single_prompt = prompt[i]
-        samples = sample(model, sampler, H=512, W=512, seed=seed, prompt=single_prompt, filter=filter)
-        total_samples.append(samples)
+            if i == iterations - 1:
+                # only profile second iteration
+                last_inference = True # programming war crime ... I know
+
+            single_prompt = prompt[i]
+            samples = sample(model, sampler, H=512, W=512, seed=seed,
+                             prompt=single_prompt, filter=filter, profile_visible=last_inference)
+            total_samples.append(samples)
+
+    else:
+        for i in range(iterations):
+            single_prompt = prompt[i]
+            samples = sample(model, sampler, H=512, W=512, seed=seed,
+                             prompt=single_prompt, filter=filter, profile_visible=False)
+            total_samples.append(samples)
+
     total_runtime = (time.time() - start)
-
     return total_samples, total_runtime
 
 
@@ -246,12 +284,13 @@ def init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=0
     return state
 
 
-def init_and_sampling(version_dict, sampler, seed, prompt, iterations, tome_ratio=0.5):
+def init_and_sampling(version_dict, sampler, seed, prompt, iterations, tome_ratio=0.5, profile_visible=True):
     print(f"Initializing and sampling with TOME ratio = {tome_ratio} ...")
     state = init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=tome_ratio)
     model = state["model"]
     load_model(model)
-    samples, total_runtime = profile_sampling(model, sampler, seed, prompt, iterations, filter=state.get("filter"))
+    samples, total_runtime = profile_sampling(model, sampler, seed, prompt, iterations,
+                                              filter=state.get("filter"), profile_visible=profile_visible)
     return samples, total_runtime
 
 
@@ -324,12 +363,19 @@ def main():
     parser.add_argument("--seed", type=int, default=0, help="Seed for random number generation.")
     parser.add_argument("--output", default="output_image.png", help="Output image path.")
     parser.add_argument("--diffuser", action=argparse.BooleanOptionalAction, help="Use Huggingface diffuser")
+    parser.add_argument("--profile", action=argparse.BooleanOptionalAction, help="Enable torch profiler")
     args = parser.parse_args()
 
     def ddict():
         return defaultdict(ddict)
     runtimes = ddict()
     samples = ddict()
+    tome_ratios = [0]
+
+    profile_visible = args.profile
+    if profile_visible:
+        assert args.diffuser is None, "Assertion: Unable to initialize profile with diffuser"
+        print("Profiling with torch.profiler ...")
 
     # Use model source code
     if args.diffuser is None:
@@ -339,33 +385,31 @@ def main():
         sampler.noise_sampler = SeededNoise(seed=args.seed)
         prompts = PROMPT
 
-        for tome_ratio in [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]:
-            print(f"\tToMe ratio: {tome_ratio}")
+        for tome_ratio in tome_ratios:
             samples[tome_ratio], runtimes[tome_ratio] = init_and_sampling(
-                 version_dict, sampler, args.seed, prompts, len(prompts), tome_ratio=tome_ratio
+                 version_dict, sampler, args.seed, prompts, len(prompts), tome_ratio=tome_ratio, profile_visible=profile_visible
             )
-            print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
+            if profile_visible is None:
+                print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
         samples = preprocess_samples(samples)
-
 
     # Use Diffuser
     elif args.diffuser:
         prompts = PROMPT
         # tome loop
-        for tome_ratio in [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6]:
-            print(f"\tToMe ratio: {tome_ratio}")
+        for tome_ratio in tome_ratios:
             samples[tome_ratio], runtimes[tome_ratio] = init_and_sampling_diffuser(
                 args.n_steps, prompts, len(prompts), tome_ratio=tome_ratio
             )
             print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
 
-
     ## Print Results
-    for tome_ratio, runtime in runtimes.items():
-        no_tome_runtime = runtimes[0]  # Assuming '0' is the key for the base case without ToMe.
-        time_perc = 100 * (no_tome_runtime - runtime) / no_tome_runtime
-        print(
-            f"ToMe ratio: {tome_ratio:.1f} -- runtime reduction: {time_perc:5.2f}%")
+    if runtimes[0] and not profile_visible:
+        for tome_ratio, runtime in runtimes.items():
+            no_tome_runtime = runtimes[0]
+            time_perc = 100 * (no_tome_runtime - runtime) / no_tome_runtime
+            print(
+                f"ToMe ratio: {tome_ratio:.1f} -- runtime reduction: {time_perc:5.2f}%")
 
     save_samples_in_grids(samples, diffuser=args.diffuser)
 
