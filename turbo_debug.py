@@ -191,39 +191,27 @@ def sample(
     return samples
 
 
-def profile_sampling(model, sampler, seed, prompt, iterations, filter=None, profile_visible=False):
+def profile_sampling(model, sampler, seed, prompts, iterations, filter=None, profile_visible=False):
     """
-    profile multiple sampling processes
-
-    profile_visible: if profiling is on, inference the model for only one prompt and record profiling result
+    Profile multiple sampling processes.
+    - profile_visible: If True, perform profiling only on the last iteration.
     """
     total_samples = []
     start = time.time()
-    #
-    if profile_visible:
-        # TODO check the "warm-up" issue in SDXL Turbo
-        iterations = 2
-        last_inference = False
-        for i in range(iterations):
 
-            if i == iterations - 1:
-                # only profile second iteration
-                last_inference = True # programming war crime ... I know
+    actual_iterations = 2 if profile_visible else iterations
 
-            single_prompt = prompt[i]
-            samples = sample(model, sampler, H=512, W=512, seed=seed,
-                             prompt=single_prompt, filter=filter, profile_visible=last_inference)
-            total_samples.append(samples)
+    for i in range(actual_iterations):
+        profile_this_iter = profile_visible if i == actual_iterations - 1 else False
 
-    else:
-        for i in range(iterations):
-            single_prompt = prompt[i]
-            samples = sample(model, sampler, H=512, W=512, seed=seed,
-                             prompt=single_prompt, filter=filter, profile_visible=False)
-            total_samples.append(samples)
+        single_prompt = prompts[0] if profile_visible and len(prompts) == 1 else prompts[i % len(prompts)]
+        samples = sample(model, sampler, H=512, W=512, seed=seed,
+                         prompt=single_prompt, filter=filter, profile_visible=profile_this_iter)
+        total_samples.append(samples)
 
     total_runtime = (time.time() - start)
     return total_samples, total_runtime
+
 
 
 def load_model_from_config(config, ckpt=None, verbose=True):
@@ -346,9 +334,6 @@ def images_to_grid(images, grid_size=None, save_path="output_grid.png"):
 def save_samples_in_grids(samples, diffuser):
     """
     Save images in samples dictionary to grid images.
-
-    Parameters:
-    - samples: A dictionary with tome ratios as keys and lists of PIL Images as values.
     """
     for tome_ratio, images_list in samples.items():
         save_path = f"output_images_grid_tome_{tome_ratio}_diffuser_{diffuser}.png"
@@ -370,7 +355,7 @@ def main():
         return defaultdict(ddict)
     runtimes = ddict()
     samples = ddict()
-    tome_ratios = [0]
+    tome_ratios = [0, 0.6]
 
     profile_visible = args.profile
     if profile_visible:
@@ -412,6 +397,7 @@ def main():
                 f"ToMe ratio: {tome_ratio:.1f} -- runtime reduction: {time_perc:5.2f}%")
 
     save_samples_in_grids(samples, diffuser=args.diffuser)
+
 
 if __name__ == "__main__":
     main()

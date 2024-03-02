@@ -9,6 +9,7 @@ from einops import rearrange, repeat
 from packaging import version
 from torch import nn
 from torch.utils.checkpoint import checkpoint
+from torch.profiler import profile, record_function, ProfilerActivity
 
 logpy = logging.getLogger(__name__)
 
@@ -701,26 +702,33 @@ class SpatialTransformer(nn.Module):
 
     def forward(self, x, context=None):
         # note: if no context is given, cross-attention defaults to self-attention
-        if not isinstance(context, list):
-            context = [context]
-        b, c, h, w = x.shape
-        x_in = x
-        x = self.norm(x)
-        if not self.use_linear:
-            x = self.proj_in(x)
-        x = rearrange(x, "b c h w -> b (h w) c").contiguous()
-        if self.use_linear:
-            x = self.proj_in(x)
-        for i, block in enumerate(self.transformer_blocks):
-            if i > 0 and len(context) == 1:
-                i = 0  # use same context for each block
-            x = block(x, context=context[i])
-        if self.use_linear:
-            x = self.proj_out(x)
-        x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w).contiguous()
-        if not self.use_linear:
-            x = self.proj_out(x)
-        return x + x_in
+        with record_function("0Model: Spatial_Transformer"):
+            if not isinstance(context, list):
+                context = [context]
+            b, c, h, w = x.shape
+            x_in = x
+            x = self.norm(x)
+
+            with record_function("0Model: Proj_In_CNN"):
+                if not self.use_linear:
+                    x = self.proj_in(x)
+                x = rearrange(x, "b c h w -> b (h w) c").contiguous()
+                if self.use_linear:
+                    x = self.proj_in(x)
+
+            for i, block in enumerate(self.transformer_blocks):
+                if i > 0 and len(context) == 1:
+                    i = 0  # use same context for each block
+                x = block(x, context=context[i])
+
+            with record_function("0Model: Proj_Out_CNN"):
+                if self.use_linear:
+                    x = self.proj_out(x)
+                x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w).contiguous()
+                if not self.use_linear:
+                    x = self.proj_out(x)
+
+            return x + x_in
 
 
 class SimpleTransformer(nn.Module):
