@@ -6,7 +6,7 @@ import turbo_tome as tomesd
 from collections import defaultdict
 from torch.cuda.amp import autocast
 from torch.profiler import profile, record_function, ProfilerActivity
-from scripts.demo.streamlit_helpers import *
+from util_debug import *
 from diffusers import AutoPipelineForText2Image
 from prompting import PROMPT
 
@@ -174,8 +174,11 @@ def sample(
                 samples_z = sampler(denoiser, randn, cond=c, uc=uc)
                 samples_x = model.decode_first_stage(samples_z)
 
+            key_average = None
             if profile_visible:
-                print(prof.key_averages().table(sort_by="cuda_time_total"))
+                key_average = prof.key_averages()
+                print(key_average.table(sort_by="cuda_time_total"))
+
 
             samples = torch.clamp((samples_x + 1.0) / 2.0, min=0.0, max=1.0)
             if filter is not None:
@@ -188,10 +191,10 @@ def sample(
                 .cpu()
                 .numpy()
             )
-    return samples
+    return samples, key_average
 
 
-def profile_sampling(model, sampler, seed, prompts, iterations, filter=None, profile_visible=False):
+def multi_sampling(model, sampler, seed, prompts, iterations, filter=None, profile_visible=False):
     """
     Profile multiple sampling processes.
     - profile_visible: If True, perform profiling only on the last iteration.
@@ -199,19 +202,19 @@ def profile_sampling(model, sampler, seed, prompts, iterations, filter=None, pro
     total_samples = []
     start = time.time()
 
+    # TODO probably need a more averaged profiling
     actual_iterations = 2 if profile_visible else iterations
 
     for i in range(actual_iterations):
         profile_this_iter = profile_visible if i == actual_iterations - 1 else False
 
         single_prompt = prompts[0] if profile_visible and len(prompts) == 1 else prompts[i % len(prompts)]
-        samples = sample(model, sampler, H=512, W=512, seed=seed,
+        samples, key_average = sample(model, sampler, H=512, W=512, seed=seed,
                          prompt=single_prompt, filter=filter, profile_visible=profile_this_iter)
         total_samples.append(samples)
 
     total_runtime = (time.time() - start)
-    return total_samples, total_runtime
-
+    return total_samples, total_runtime, key_average
 
 
 def load_model_from_config(config, ckpt=None, verbose=True):
@@ -277,9 +280,11 @@ def init_and_sampling(version_dict, sampler, seed, prompt, iterations, tome_rati
     state = init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=tome_ratio)
     model = state["model"]
     load_model(model)
-    samples, total_runtime = profile_sampling(model, sampler, seed, prompt, iterations,
+    samples, total_runtime, key_average = multi_sampling(model, sampler, seed, prompt, iterations,
                                               filter=state.get("filter"), profile_visible=profile_visible)
-    return samples, total_runtime
+
+    # note that key average is not None only for last sample when profiling
+    return samples, total_runtime, key_average
 
 
 def init_and_sampling_diffuser(n_steps, prompt, iterations, tome_ratio=0):
@@ -301,46 +306,6 @@ def init_and_sampling_diffuser(n_steps, prompt, iterations, tome_ratio=0):
     return total_samples, total_runtime
 
 
-def preprocess_samples(samples):
-    processed_samples = {}
-    for tome_ratio, image_arrays in samples.items():
-        images_list = [[Image.fromarray(img_array.squeeze())] for img_array in image_arrays]
-        processed_samples[tome_ratio] = images_list
-    return processed_samples
-
-
-def images_to_grid(images, grid_size=None, save_path="output_grid.png"):
-    # Flatten the list of lists to get a simple list of images
-    flat_images = [img[0] for img in images]
-
-    if grid_size is None:
-        grid_cols = int(math.ceil(math.sqrt(len(flat_images))))
-        grid_rows = int(math.ceil(len(flat_images) / grid_cols))
-    else:
-        grid_rows, grid_cols = grid_size
-
-    img_width, img_height = flat_images[0].size
-    grid_img = Image.new('RGB', size=(img_width * grid_cols, img_height * grid_rows))
-
-    for index, img in enumerate(flat_images):
-        row = index // grid_cols
-        col = index % grid_cols
-        grid_img.paste(img, box=(col * img_width, row * img_height))
-
-    grid_img.save(save_path)
-    print(f"Grid image saved at {save_path}")
-
-
-def save_samples_in_grids(samples, diffuser):
-    """
-    Save images in samples dictionary to grid images.
-    """
-    for tome_ratio, images_list in samples.items():
-        save_path = f"output_images_grid_tome_{tome_ratio}_diffuser_{diffuser}.png"
-        images_to_grid(images_list, save_path=save_path)
-        print(f"Saved images grid for ToMe ratio {tome_ratio} at: {save_path}")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Generate images with Stable Diffusion Turbo.")
     parser.add_argument("--version", choices=VERSION2SPECS.keys(), default="SDXL-Turbo", help="Model version to use.")
@@ -355,12 +320,13 @@ def main():
         return defaultdict(ddict)
     runtimes = ddict()
     samples = ddict()
-    tome_ratios = [0, 0.6]
+    tome_ratios = [0.6]
 
     profile_visible = args.profile
     if profile_visible:
         assert args.diffuser is None, "Assertion: Unable to initialize profile with diffuser"
         print("Profiling with torch.profiler ...")
+
 
     # Use model source code
     if args.diffuser is None:
@@ -371,12 +337,17 @@ def main():
         prompts = PROMPT
 
         for tome_ratio in tome_ratios:
-            samples[tome_ratio], runtimes[tome_ratio] = init_and_sampling(
+            samples[tome_ratio], runtimes[tome_ratio], key_average = init_and_sampling(
                  version_dict, sampler, args.seed, prompts, len(prompts), tome_ratio=tome_ratio, profile_visible=profile_visible
             )
             if profile_visible is None:
                 print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
         samples = preprocess_samples(samples)
+
+        if profile_visible:
+            # TODO plotting function
+            ...
+
 
     # Use Diffuser
     elif args.diffuser:
@@ -387,6 +358,7 @@ def main():
                 args.n_steps, prompts, len(prompts), tome_ratio=tome_ratio
             )
             print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
+
 
     ## Print Results
     if runtimes[0] and not profile_visible:
