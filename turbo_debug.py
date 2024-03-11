@@ -8,7 +8,7 @@ from torch.cuda.amp import autocast
 from torch.profiler import profile, record_function, ProfilerActivity
 from util_debug import *
 from diffusers import AutoPipelineForText2Image
-from prompting import PROMPT
+from turbo_prompt import PROMPT
 
 #####################################################################################
 # helper functions from original turbo demo
@@ -275,7 +275,7 @@ def init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=0
     return state
 
 
-def init_and_sampling(version_dict, sampler, seed, prompt, iterations, tome_ratio=0.5, profile_visible=True):
+def init_and_sampling(version_dict, sampler, seed, prompt, iterations, tome_ratio=0.0, profile_visible=True):
     print(f"Initializing and sampling with TOME ratio = {tome_ratio} ...")
     state = init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=tome_ratio)
     model = state["model"]
@@ -287,7 +287,7 @@ def init_and_sampling(version_dict, sampler, seed, prompt, iterations, tome_rati
     return samples, total_runtime, key_average
 
 
-def init_and_sampling_diffuser(n_steps, prompt, iterations, tome_ratio=0):
+def init_and_sampling_diffuser(n_steps, prompt, iterations, tome_ratio=0.0):
     pipe = AutoPipelineForText2Image.from_pretrained("stabilityai/sdxl-turbo",
                                                      height=512, width=512,
                                                      torch_dtype=torch.float32).to("cuda")
@@ -320,12 +320,15 @@ def main():
         return defaultdict(ddict)
     runtimes = ddict()
     samples = ddict()
-    tome_ratios = [0.6]
+    tome_ratios = [0.0]
 
     profile_visible = args.profile
     if profile_visible:
         assert args.diffuser is None, "Assertion: Unable to initialize profile with diffuser"
         print("Profiling with torch.profiler ...")
+        model_sampling_cuda_time = {}
+        total_cuda_time = {}
+        total_cpu_time = {}
 
 
     # Use model source code
@@ -340,16 +343,33 @@ def main():
             samples[tome_ratio], runtimes[tome_ratio], key_average = init_and_sampling(
                  version_dict, sampler, args.seed, prompts, len(prompts), tome_ratio=tome_ratio, profile_visible=profile_visible
             )
-            if profile_visible is None:
+            if profile_visible:
+                # TODO plotting function
+                model_sampling_cuda_time = merge_dictionary(key_average,
+                                                            ["0Model: Model_Sampling"],
+                                                            "cuda_time_total",
+                                                            model_sampling_cuda_time
+                                                            )
+                total_cuda_time = merge_dictionary(key_average,
+                                                   ["0Model: Model_Sampling", "0Model: VAE_Decoder"],
+                                                   "cuda_time_total",
+                                                   total_cuda_time
+                                                   )
+                total_cpu_time = merge_dictionary(key_average,
+                                                   ["self_cpu_time_total"],
+                                                   "cuda_time_total",
+                                                   total_cpu_time
+                                                   )
+                print(model_sampling_cuda_time)
+                print(total_cuda_time)
+                print(total_cpu_time)
+
+            else:
                 print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
         samples = preprocess_samples(samples)
 
-        if profile_visible:
-            # TODO plotting function
-            ...
 
-
-    # Use Diffuser
+    # Use Huggingface Diffuser
     elif args.diffuser:
         prompts = PROMPT
         # tome loop
