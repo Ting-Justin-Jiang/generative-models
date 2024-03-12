@@ -1,3 +1,6 @@
+import os
+import argparse
+import time
 import numpy as np
 import torch
 import torch.nn as nn
@@ -5,10 +8,13 @@ import torch.nn.parallel
 import torch.optim
 import torch.utils.data
 from torch.utils.data.dataloader import DataLoader
-import time
+from interaction.io_handler import (PairIoHandler,
+                                    PlayerIoHandler,
+                                    InteractionIoHandler,
+                                    SampleIoHandler,
+                                    InteractionLogitIoHandler,
+                                    set_args)
 from util_debug import *
-import os
-import argparse
 
 
 MAX_BS = 4 * 100
@@ -182,6 +188,3 @@ def compute_interactions(args, model: nn.Module, dataloader: DataLoader, interac
                 else:
                     raise Exception(f"output type [{args.out_type}] not supported.")
 
-
-def main():
-    ...

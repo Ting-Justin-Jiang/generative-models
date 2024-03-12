@@ -37,6 +37,21 @@ def clamp(x: int, min: int, max: int) -> int:
     else:
         return x
 
+
+def seed_torch(seed) -> None:
+    """ set random seed for all related packages
+    """
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    if hasattr(torch, 'backends'):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+
 def preprocess_samples(samples):
     processed_samples = {}
     for tome_ratio, image_arrays in samples.items():

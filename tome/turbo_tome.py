@@ -1,8 +1,7 @@
 import torch
 import math
+import tome.turbo_merge as merge
 from typing import Type, Dict, Any, Tuple, Callable
-
-from tomesd import merge
 from tomesd.utils import isinstance_str, init_generator
 
 
@@ -53,7 +52,11 @@ def make_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.Module]
             m_a, m_c, m_m, u_a, u_c, u_m = compute_merge(x, self._tome_info)
 
             # This is where the meat of the computation happens
-            x = u_a(self.attn1(m_a(self.norm1(x)), context=context if self.disable_self_attn else None)) + x
+            # self attention
+            x_a = m_a(self.norm1(x))
+            x_a = self.attn1(x_a, context=context if self.disable_self_attn else None)
+            x = u_a(x_a) + x
+
             x = u_c(self.attn2(m_c(self.norm2(x)), context=context)) + x
             x = u_m(self.ff(m_m(self.norm3(x)))) + x
 

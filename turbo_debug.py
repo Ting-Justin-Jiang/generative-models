@@ -1,11 +1,9 @@
-import os
 import argparse
-import torch
 import time
-import turbo_tome as tomesd
+from tome import turbo_tome as tomesd
 from collections import defaultdict
 from torch.cuda.amp import autocast
-from torch.profiler import profile, record_function, ProfilerActivity
+from torch.profiler import profile, record_function
 from util_debug import *
 from diffusers import AutoPipelineForText2Image
 from turbo_prompt import PROMPT
@@ -203,7 +201,7 @@ def multi_sampling(model, sampler, seed, prompts, iterations, filter=None, profi
     start = time.time()
 
     # TODO probably need a more averaged profiling
-    actual_iterations = 2 if profile_visible else iterations
+    actual_iterations = 5 if profile_visible else iterations
 
     for i in range(actual_iterations):
         profile_this_iter = profile_visible if i == actual_iterations - 1 else False
@@ -263,8 +261,10 @@ def init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=0
         config = OmegaConf.load(config)
         model, msg = load_model_from_config(config, ckpt if load_ckpt else None)
 
-        if tome_ratio > 0:
-            model = tomesd.apply_patch(model, ratio=tome_ratio)
+        if tome_ratio > 0.0:
+            model = tomesd.apply_patch(model,
+                                       ratio=tome_ratio,
+                                       max_downsample=2)
 
         state["msg"] = msg
         state["model"] = model
@@ -282,7 +282,7 @@ def init_and_sampling(version_dict, sampler, seed, prompt, iterations, tome_rati
     load_model(model)
     samples, total_runtime, key_average = multi_sampling(model, sampler, seed, prompt, iterations,
                                               filter=state.get("filter"), profile_visible=profile_visible)
-
+    del model
     # note that key average is not None only for last sample when profiling
     return samples, total_runtime, key_average
 
@@ -292,7 +292,7 @@ def init_and_sampling_diffuser(n_steps, prompt, iterations, tome_ratio=0.0):
                                                      height=512, width=512,
                                                      torch_dtype=torch.float32).to("cuda")
     if tome_ratio > 0:
-        pipe = tomesd.apply_patch(pipe, ratio=tome_ratio)
+        pipe = tomesd.apply_patch(pipe, ratio=tome_ratio, max_downsample=2)
     pipe.set_progress_bar_config(disable=True)
 
     total_samples = []
@@ -314,14 +314,15 @@ def main():
     parser.add_argument("--output", default="output_image.png", help="Output image path.")
     parser.add_argument("--diffuser", action=argparse.BooleanOptionalAction, help="Use Huggingface diffuser")
     parser.add_argument("--profile", action=argparse.BooleanOptionalAction, help="Enable torch profiler")
+    parser.add_argument("--tome_ratios", type=list, default=[0.3, 0.3, 0.5, 0.5], help="Enable torch profiler")
     args = parser.parse_args()
 
     def ddict():
         return defaultdict(ddict)
     runtimes = ddict()
     samples = ddict()
-    tome_ratios = [0.0]
 
+    tome_ratios = args.tome_ratios
     profile_visible = args.profile
     if profile_visible:
         assert args.diffuser is None, "Assertion: Unable to initialize profile with diffuser"
@@ -367,6 +368,9 @@ def main():
             else:
                 print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
         samples = preprocess_samples(samples)
+
+
+    # TODO add a new branch named interaction
 
 
     # Use Huggingface Diffuser

@@ -172,7 +172,7 @@ class GumbelQuantizer(AbstractQuantizer):
 class VectorQuantizer(AbstractQuantizer):
     """
     ____________________________________________
-    Discretization bottleneck part of the VQ-VAE.
+    Discretization interaction part of the VQ-VAE.
     Inputs:
     - n_e : number of embeddings
     - e_dim : dimension of embedding
