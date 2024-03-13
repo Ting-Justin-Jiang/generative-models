@@ -39,7 +39,8 @@ def clamp(x: int, min: int, max: int) -> int:
 
 
 def seed_torch(seed) -> None:
-    """ set random seed for all related packages
+    """
+    set random seed for all related packages
     """
     os.environ['PYTHONHASHSEED'] = str(seed)
     random.seed(seed)
@@ -90,6 +91,135 @@ def save_samples_in_grids(samples, diffuser):
         save_path = f"output_images_grid_tome_{tome_ratio}_diffuser_{diffuser}.png"
         images_to_grid(images_list, save_path=save_path)
         print(f"Saved images grid for ToMe ratio {tome_ratio} at: {save_path}")
+
+
+
+def get_discretization(discretization, options, key=1):
+    if discretization == "LegacyDDPMDiscretization":
+        discretization_config = {
+            "target": "sgm.modules.diffusionmodules.discretizer.LegacyDDPMDiscretization",
+        }
+    elif discretization == "EDMDiscretization":
+        sigma_min = options.get("sigma_min", 0.03)
+        sigma_max = options.get("sigma_max", 14.61)
+        rho = options.get("rho", 3.0)
+
+        discretization_config = {
+            "target": "sgm.modules.diffusionmodules.discretizer.EDMDiscretization",
+            "params": {
+                "sigma_min": sigma_min,
+                "sigma_max": sigma_max,
+                "rho": rho,
+            },
+        }
+    return discretization_config
+
+
+def get_guider(guider, options, key):
+    additional_guider_kwargs = options.pop("additional_guider_kwargs", {})
+
+    if guider == "IdentityGuider":
+        guider_config = {
+            "target": "sgm.modules.diffusionmodules.guiders.IdentityGuider"
+        }
+    elif guider == "VanillaCFG":
+        scale = options.get("cfg_scale", 5.0)
+        guider_config = {
+            "target": "sgm.modules.diffusionmodules.guiders.VanillaCFG",
+            "params": {
+                "scale": scale,
+                **additional_guider_kwargs,
+            },
+        }
+    elif guider == "LinearPredictionGuider":
+        max_scale = options.get("max_cfg_scale", 1.5)
+        min_scale = options.get("min_cfg_scale", 1.0)
+
+        guider_config = {
+            "target": "sgm.modules.diffusionmodules.guiders.LinearPredictionGuider",
+            "params": {
+                "max_scale": max_scale,
+                "min_scale": min_scale,
+                "num_frames": options.get("num_frames", 10),
+                **additional_guider_kwargs,
+            },
+        }
+    else:
+        raise NotImplementedError
+
+    return guider_config
+
+
+def get_sampler(sampler_name, steps, discretization_config, guider_config, options, key=1):
+    # default values for sampler
+    s_churn = options.get(f"s_churn_{key}", 0.0)
+    s_tmin = options.get(f"s_tmin_{key}", 0.0)
+    s_tmax = options.get(f"s_tmax_{key}", 999.0)
+    s_noise = options.get(f"s_noise_{key}", 1.0)
+    eta = options.get("eta", 1.0)
+    order = options.get("order", 4)
+
+    if sampler_name in ["EulerEDMSampler", "HeunEDMSampler"]:
+        if sampler_name == "EulerEDMSampler":
+            sampler = EulerEDMSampler(
+                num_steps=steps,
+                discretization_config=discretization_config,
+                guider_config=guider_config,
+                s_churn=s_churn,
+                s_tmin=s_tmin,
+                s_tmax=s_tmax,
+                s_noise=s_noise,
+                verbose=True,
+            )
+        elif sampler_name == "HeunEDMSampler":
+            sampler = HeunEDMSampler(
+                num_steps=steps,
+                discretization_config=discretization_config,
+                guider_config=guider_config,
+                s_churn=s_churn,
+                s_tmin=s_tmin,
+                s_tmax=s_tmax,
+                s_noise=s_noise,
+                verbose=True,
+            )
+    elif sampler_name in ["EulerAncestralSampler", "DPMPP2SAncestralSampler"]:
+        if sampler_name == "EulerAncestralSampler":
+            sampler = EulerAncestralSampler(
+                num_steps=steps,
+                discretization_config=discretization_config,
+                guider_config=guider_config,
+                eta=eta,
+                s_noise=s_noise,
+                verbose=True,
+            )
+        elif sampler_name == "DPMPP2SAncestralSampler":
+            sampler = DPMPP2SAncestralSampler(
+                num_steps=steps,
+                discretization_config=discretization_config,
+                guider_config=guider_config,
+                eta=eta,
+                s_noise=s_noise,
+                verbose=True,
+            )
+    elif sampler_name == "DPMPP2MSampler":
+        sampler = DPMPP2MSampler(
+            num_steps=steps,
+            discretization_config=discretization_config,
+            guider_config=guider_config,
+            verbose=True,
+        )
+    elif sampler_name == "LinearMultistepSampler":
+        sampler = LinearMultistepSampler(
+            num_steps=steps,
+            discretization_config=discretization_config,
+            guider_config=guider_config,
+            order=order,
+            verbose=True,
+        )
+    else:
+        raise ValueError(f"unknown sampler {sampler_name}!")
+
+    return sampler
 
 
 def get_reward(args, logits, label):

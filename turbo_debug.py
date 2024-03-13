@@ -314,7 +314,7 @@ def main():
     parser.add_argument("--output", default="output_image.png", help="Output image path.")
     parser.add_argument("--diffuser", action=argparse.BooleanOptionalAction, help="Use Huggingface diffuser")
     parser.add_argument("--profile", action=argparse.BooleanOptionalAction, help="Enable torch profiler")
-    parser.add_argument("--tome_ratios", type=list, default=[0.3, 0.3, 0.5, 0.5], help="Enable torch profiler")
+    parser.add_argument("--tome_ratios", type=list, default=[0.1, 0.3, 0.5, 0.5], help="Enable torch profiler")
     args = parser.parse_args()
 
     def ddict():

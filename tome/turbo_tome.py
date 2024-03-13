@@ -1,3 +1,4 @@
+"""TODO Subjective to later adaption."""
 import torch
 import math
 import tome.turbo_merge as merge
@@ -225,12 +226,14 @@ def apply_patch(
     }
     hook_tome_model(diffusion_model)
 
+    num_patch = 0
     for _, module in diffusion_model.named_modules():
         # If for some reason this has a different name, create an issue and I'll fix it
         if isinstance_str(module, "BasicTransformerBlock"):
             make_tome_block_fn = make_diffusers_tome_block if is_diffusers else make_tome_block
             module.__class__ = make_tome_block_fn(module.__class__)
             module._tome_info = diffusion_model._tome_info
+            num_patch += 1
 
             # Something introduced in SD 2.0 (LDM only)
             if not hasattr(module, "disable_self_attn") and not is_diffusers:
@@ -241,6 +244,7 @@ def apply_patch(
                 module.use_ada_layer_norm = False
                 module.use_ada_layer_norm_zero = False
 
+    print(f"Applied tome patch for {num_patch}/70 transformer blocks")
     return model
 
 
