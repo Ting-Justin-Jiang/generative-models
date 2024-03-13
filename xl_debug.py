@@ -22,17 +22,6 @@ VERSION2SPECS = {
 }
 
 
-def load_model(model):
-    model.cuda()
-
-
-def unload_model(model):
-    global lowvram_mode
-    if lowvram_mode:
-        model.cpu()
-        torch.cuda.empty_cache()
-
-
 def init_sampler(
     args,
     key=1,
@@ -261,7 +250,7 @@ def init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=0
         if tome_ratio > 0.0:
             model = tomesd.apply_patch(model,
                                        ratio=tome_ratio,
-                                       max_downsample=4)
+                                       max_downsample=2)
 
         state["msg"] = msg
         state["model"] = model
@@ -316,13 +305,14 @@ def main():
     parser.add_argument("--profile", action=argparse.BooleanOptionalAction, help="Enable torch profiler.")
     parser.add_argument("--return_latent", action=argparse.BooleanOptionalAction, help="Return last stage latent variable.")
     parser.add_argument("--resolution", type=tuple, default=(1024, 1024), help="Resolution of the image")
-    parser.add_argument("--tome_ratios", type=list, default=[0.0, 0.25, 0.5], help="Enable torch profiler.")
+    parser.add_argument("--tome_ratios", type=list, default=[0.0, 0.0, 0.25, 0.5, 0.75], help="Token merging ratio")
     args = parser.parse_args()
 
     def ddict():
         return defaultdict(ddict)
     runtimes = ddict()
     samples = ddict()
+    set_lowvram_mode(True)
 
     tome_ratios = args.tome_ratios
     profile_visible = args.profile
@@ -391,7 +381,7 @@ def main():
             print(
                 f"ToMe ratio: {tome_ratio:.1f} -- runtime reduction: {time_perc:5.2f}%")
 
-    save_samples_in_grids(samples, diffuser=args.diffuser)
+    save_samples_in_grids(args, samples, diffuser=args.diffuser)
 
 
 if __name__ == "__main__":

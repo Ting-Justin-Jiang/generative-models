@@ -3,6 +3,16 @@ import random
 import torch.nn.functional as F
 
 
+def load_model(model):
+    model.cuda()
+
+
+def unload_model(model):
+    model.cpu()
+    del model
+    torch.cuda.empty_cache()
+
+
 def extract_info(events, keywords, column):
     result = {}
     if "self_cpu_time_total" in keywords:
@@ -83,12 +93,12 @@ def images_to_grid(images, grid_size=None, save_path="output_grid.png"):
     print(f"Grid image saved at {save_path}")
 
 
-def save_samples_in_grids(samples, diffuser):
+def save_samples_in_grids(args, samples, diffuser):
     """
     Save images in samples dictionary to grid images.
     """
     for tome_ratio, images_list in samples.items():
-        save_path = f"output_images_grid_tome_{tome_ratio}_diffuser_{diffuser}.png"
+        save_path = f"output/{args.version}_tome_{tome_ratio}_diffuser_{diffuser}.png"
         images_to_grid(images_list, save_path=save_path)
         print(f"Saved images grid for ToMe ratio {tome_ratio} at: {save_path}")
 

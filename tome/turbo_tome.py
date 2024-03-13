@@ -244,7 +244,7 @@ def apply_patch(
                 module.use_ada_layer_norm = False
                 module.use_ada_layer_norm_zero = False
 
-    print(f"Applied tome patch for {num_patch}/70 transformer blocks")
+    print(f"Applied tome patch for {num_patch} transformer blocks")
     return model
 
 

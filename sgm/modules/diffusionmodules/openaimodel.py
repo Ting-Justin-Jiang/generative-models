@@ -843,18 +843,15 @@ class UNetModel(nn.Module):
 
         h = x
 
-        with record_function("0Model: UNet_input_blocks"):
-            for module in self.input_blocks:
-                h = module(h, emb, context)
-                hs.append(h)
+        for module in self.input_blocks:
+            h = module(h, emb, context)
+            hs.append(h)
 
-        with record_function("0Model: UNet_middle_blocks"):
-            h = self.middle_block(h, emb, context)
+        h = self.middle_block(h, emb, context)
 
-        with record_function("0Model: UNet_output_blocks"):
-            for module in self.output_blocks:
-                h = th.cat([h, hs.pop()], dim=1)
-                h = module(h, emb, context)
+        for module in self.output_blocks:
+            h = th.cat([h, hs.pop()], dim=1)
+            h = module(h, emb, context)
 
         h = h.type(x.dtype)
 
