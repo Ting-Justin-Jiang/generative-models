@@ -1,7 +1,10 @@
 from scripts.demo.streamlit_helpers import *
+import sys
 import random
 import torch.nn.functional as F
-
+from torchvision import transforms
+from functools import partial
+from torchmetrics.functional.multimodal import clip_score
 
 def load_model(model):
     model.cuda()
@@ -74,34 +77,48 @@ def preprocess_samples(samples):
 def images_to_grid(images, grid_size=None, save_path="output_grid.png"):
     # Flatten the list of lists to get a simple list of images
     flat_images = [img[0] for img in images]
+    if len(flat_images) > 64:
+        saved_images = flat_images[:64]
+    else:
+        saved_images = flat_images
 
     if grid_size is None:
-        grid_cols = int(math.ceil(math.sqrt(len(flat_images))))
-        grid_rows = int(math.ceil(len(flat_images) / grid_cols))
+        grid_cols = int(math.ceil(math.sqrt(len(saved_images))))
+        grid_rows = int(math.ceil(len(saved_images) / grid_cols))
     else:
         grid_rows, grid_cols = grid_size
 
-    img_width, img_height = flat_images[0].size
+    img_width, img_height = saved_images[0].size
     grid_img = Image.new('RGB', size=(img_width * grid_cols, img_height * grid_rows))
 
-    for index, img in enumerate(flat_images):
+    for index, img in enumerate(saved_images):
         row = index // grid_cols
         col = index % grid_cols
         grid_img.paste(img, box=(col * img_width, row * img_height))
 
     grid_img.save(save_path)
     print(f"Grid image saved at {save_path}")
+    return flat_images
 
 
-def save_samples_in_grids(args, samples, diffuser):
-    """
-    Save images in samples dictionary to grid images.
-    """
+def save_and_evaluate(args, samples, prompts):
+    transform = transforms.ToTensor()
     for tome_ratio, images_list in samples.items():
-        save_path = f"output/{args.version}_tome_{tome_ratio}_diffuser_{diffuser}.png"
-        images_to_grid(images_list, save_path=save_path)
-        print(f"Saved images grid for ToMe ratio {tome_ratio} at: {save_path}")
+        save_path = f"output/{args.version}_tome_{tome_ratio}_diffuser_{args.diffuser}.png"
 
+        images_list = images_to_grid(images_list, save_path=save_path)
+        images_tensor = np.transpose(np.stack([transform(img) for img in images_list]), (0, 2, 3, 1))
+
+        print(f"Saved images grid for ToMe ratio {tome_ratio} at: {save_path}")
+        clip_score = calculate_clip_score(images_tensor, prompts)
+        print(f"ToMe ratio: {tome_ratio} CLIP score: {clip_score}")
+
+
+def calculate_clip_score(images, prompts):
+    clip_score_fn = partial(clip_score, model_name_or_path="openai/clip-vit-base-patch16")
+    images_int = (images * 255).astype("uint8")
+    images_clip_score = clip_score_fn(torch.from_numpy(images_int).permute(0, 3, 1, 2), prompts).detach()
+    return round(float(images_clip_score), 4)
 
 
 def get_discretization(discretization, options, key=1):

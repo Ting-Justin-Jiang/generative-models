@@ -1,6 +1,6 @@
 import argparse
 import time
-from tome import turbo_tome as tomesd
+from tome import tome as tomesd
 from collections import defaultdict
 from torch.cuda.amp import autocast
 from torch.profiler import profile, record_function
@@ -299,7 +299,7 @@ def main():
     parser.add_argument("--output", default="output_image.png", help="Output image path.")
     parser.add_argument("--diffuser", action=argparse.BooleanOptionalAction, help="Use Huggingface diffuser")
     parser.add_argument("--profile", action=argparse.BooleanOptionalAction, help="Enable torch profiler")
-    parser.add_argument("--tome_ratios", type=list, default=[0.0, 0.0, 0.0, 0.25, 0.25, 0.25, 0.5, 0.5, 0.5], help="Token merging ratio")
+    parser.add_argument("--tome_ratios", type=list, default=[0.5], help="Token merging ratio")
     args = parser.parse_args()
 
     def ddict():
@@ -360,7 +360,7 @@ def main():
 
     # Use Huggingface Diffuser
     elif args.diffuser:
-        prompts = PROMPT
+        prompts = PROMPT[:16]
         # tome loop
         for tome_ratio in tome_ratios:
             samples[tome_ratio], runtimes[tome_ratio] = init_and_sampling_diffuser(

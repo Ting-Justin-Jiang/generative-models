@@ -707,24 +707,20 @@ class SpatialTransformer(nn.Module):
         b, c, h, w = x.shape
         x_in = x
         x = self.norm(x)
-
         if not self.use_linear:
             x = self.proj_in(x)
         x = rearrange(x, "b c h w -> b (h w) c").contiguous()
         if self.use_linear:
             x = self.proj_in(x)
-
         for i, block in enumerate(self.transformer_blocks):
             if i > 0 and len(context) == 1:
                 i = 0  # use same context for each block
             x = block(x, context=context[i])
-
         if self.use_linear:
             x = self.proj_out(x)
         x = rearrange(x, "b (h w) c -> b c h w", h=h, w=w).contiguous()
         if not self.use_linear:
             x = self.proj_out(x)
-
         return x + x_in
 
 

@@ -1,6 +1,6 @@
 import argparse
 import time
-from tome import turbo_tome as tomesd
+from tome import tome as tomesd
 from collections import defaultdict
 from torch.cuda.amp import autocast
 from torch.profiler import profile, record_function
@@ -8,6 +8,7 @@ from util_debug import *
 from diffusers import DiffusionPipeline
 from turbo_prompt import PROMPT
 from pytorch_lightning import seed_everything
+from torchmetrics.functional.multimodal import clip_score
 
 VERSION2SPECS = {
     "SDXL-base-1.0": {
@@ -18,6 +19,15 @@ VERSION2SPECS = {
         "is_legacy": False,
         "config": "configs/inference/sd_xl_base.yaml",
         "ckpt": "checkpoints/sd_xl_base_1.0.safetensors",
+    },
+    "SD-2.1-768": {
+        "H": 768,
+        "W": 768,
+        "C": 4,
+        "f": 8,
+        "is_legacy": True,
+        "config": "configs/inference/sd_2_1_768.yaml",
+        "ckpt": "checkpoints/v2-1_768-ema-pruned.safetensors",
     }
 }
 
@@ -134,15 +144,6 @@ def do_sample(
                 if filter is not None:
                     samples = filter(samples)
 
-                samples = (
-                    (255 * samples)
-                    .to(dtype=torch.uint8)
-                    .permute(0, 2, 3, 1)
-                    .detach()
-                    .cpu()
-                    .numpy()
-                )
-
                 if return_latents:
                     return samples, samples_z
                 return samples, key_average
@@ -168,7 +169,7 @@ def multi_sampling(args, model, sampler, prompts, filter=None,
     }
 
     total_samples = []
-    start = time.time()
+    total_runtime = 0
 
     actual_iterations = 4 if profile_visible else len(prompts)
 
@@ -187,17 +188,28 @@ def multi_sampling(args, model, sampler, prompts, filter=None,
 
         # set to 1 for lower GPU burden
         num_samples = 1
+        start = time.time()
         samples, key_average = do_sample(model, sampler, value_dict,
-                            num_samples,
-                            1024, 1024, C, F,
-                            force_uc_zero_embeddings=["txt"] if not is_legacy else [],
-                            return_latents=return_latents,
-                            filter=filter,
-                            profile_visible=profile_this_iter
-                            )
+                                num_samples,
+                                H, W, C, F,
+                                force_uc_zero_embeddings=["txt"] if not is_legacy else [],
+                                return_latents=return_latents,
+                                filter=filter,
+                                profile_visible=profile_this_iter
+                                )
+        single_runtime = (time.time() - start)
+        total_runtime += single_runtime
+
+        samples = (
+            (255 * samples)
+            .to(dtype=torch.uint8)
+            .permute(0, 2, 3, 1)
+            .detach()
+            .cpu()
+            .numpy()
+        )
         total_samples.append(samples)
 
-    total_runtime = (time.time() - start)
     return total_samples, total_runtime, key_average
 
 
@@ -238,6 +250,7 @@ def load_model_from_config(config, ckpt=None, verbose=True):
     return model, msg
 
 
+@st.cache_resource()
 def init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=0.5):
     state = dict()
     if not "model" in state:
@@ -250,6 +263,7 @@ def init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=0
         if tome_ratio > 0.0:
             model = tomesd.apply_patch(model,
                                        ratio=tome_ratio,
+                                       sx=2, sy=2,
                                        max_downsample=2)
 
         state["msg"] = msg
@@ -264,13 +278,14 @@ def init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=0
 def init_and_sampling(args, sampler, prompts, tome_ratio=0.0, profile_visible=True):
     seed_everything(args.seed)
     print(f"Initializing and sampling with TOME ratio = {tome_ratio} ...")
-    state = init_without_st(VERSION2SPECS[args.version], load_ckpt=True, load_filter=True, tome_ratio=tome_ratio)
+    version = VERSION2SPECS[args.version]
+    state = init_without_st(version, load_ckpt=True, load_filter=True, tome_ratio=tome_ratio)
     model = state["model"]
-    load_model(model)
+
     samples, total_runtime, key_average = multi_sampling(args, model, sampler, prompts,
-                                              filter=state.get("filter"), profile_visible=profile_visible)
+                                              filter=state.get("filter"), profile_visible=profile_visible, is_legacy=version['is_legacy'])
     # note that key average is not None only for last sample when profiling
-    unload_model(model)
+
     return samples, total_runtime, key_average
 
 
@@ -296,23 +311,22 @@ def init_and_sampling_diffuser(prompts, iterations, tome_ratio=0.0):
 def main():
     parser = argparse.ArgumentParser(description="Generate images with Stable Diffusion XL base.")
     parser.add_argument("--version", choices=VERSION2SPECS.keys(), default="SDXL-base-1.0", help="Model version to use.")
-    parser.add_argument("--n_steps", type=int, default=50, help="Number of sampling steps.")
+    parser.add_argument("--n_steps", type=int, default=40, help="Number of sampling steps.")
     parser.add_argument("--seed", type=int, default=42, help="Seed for random number generation.")
-    parser.add_argument("--sampler", default="EulerAncestralSampler", help="Sampler configuration.")
+    parser.add_argument("--sampler", default="EulerEDMSampler", help="Sampler configuration.")
     parser.add_argument("--discretization", default="LegacyDDPMDiscretization", help="Discretization configuration.")
     parser.add_argument("--guider", default="VanillaCFG", help="Guider configuration.")
     parser.add_argument("--diffuser", action=argparse.BooleanOptionalAction, help="Use Huggingface diffuser.")
     parser.add_argument("--profile", action=argparse.BooleanOptionalAction, help="Enable torch profiler.")
     parser.add_argument("--return_latent", action=argparse.BooleanOptionalAction, help="Return last stage latent variable.")
-    parser.add_argument("--resolution", type=tuple, default=(1024, 1024), help="Resolution of the image")
-    parser.add_argument("--tome_ratios", type=list, default=[0.0, 0.0, 0.25, 0.5, 0.75], help="Token merging ratio")
+    parser.add_argument("--tome_ratios", type=list, default=[0.0, 0.25, 0.5, 0.75], help="Token merging ratio")
     args = parser.parse_args()
 
     def ddict():
         return defaultdict(ddict)
     runtimes = ddict()
     samples = ddict()
-    set_lowvram_mode(True)
+    set_lowvram_mode(False)
 
     tome_ratios = args.tome_ratios
     profile_visible = args.profile
@@ -381,7 +395,9 @@ def main():
             print(
                 f"ToMe ratio: {tome_ratio:.1f} -- runtime reduction: {time_perc:5.2f}%")
 
-    save_samples_in_grids(args, samples, diffuser=args.diffuser)
+
+    print(prompts)
+    save_and_evaluate(args, samples, prompts)
 
 
 if __name__ == "__main__":

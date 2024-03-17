@@ -1,10 +1,9 @@
 """TODO Subjective to later adaption."""
 import torch
 import math
-import tome.turbo_merge as merge
+import tome.tome_merge as merge
 from typing import Type, Dict, Any, Tuple, Callable
 from tomesd.utils import isinstance_str, init_generator
-
 
 def compute_merge(x: torch.Tensor, tome_info: Dict[str, Any]) -> Tuple[Callable, ...]:
     original_h, original_w = tome_info["size"]
@@ -29,8 +28,10 @@ def compute_merge(x: torch.Tensor, tome_info: Dict[str, Any]) -> Tuple[Callable,
         use_rand = False if x.shape[0] % 2 == 1 else args["use_rand"]
         m, u = merge.bipartite_soft_matching_random2d(x, w, h, args["sx"], args["sy"], r,
                                                       no_rand=not use_rand, generator=args["generator"])
+        message = f"token merging operates at downsample: \033[91m{downsample}\033[0m, original x shape: \033[91m{x.shape}\033[0m, merged: \033[91m{r}\033[0m"
     else:
         m, u = (merge.do_nothing, merge.do_nothing)
+        message = "token merging does nothing"
 
     m_a, u_a = (m, u) if args["merge_attn"] else (merge.do_nothing, merge.do_nothing)
     m_c, u_c = (m, u) if args["merge_crossattn"] else (merge.do_nothing, merge.do_nothing)
