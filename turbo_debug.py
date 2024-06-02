@@ -299,14 +299,13 @@ def main():
     parser.add_argument("--output", default="output_image.png", help="Output image path.")
     parser.add_argument("--diffuser", action=argparse.BooleanOptionalAction, help="Use Huggingface diffuser")
     parser.add_argument("--profile", action=argparse.BooleanOptionalAction, help="Enable torch profiler")
-    parser.add_argument("--tome_ratios", type=list, default=[0.5], help="Token merging ratio")
+    parser.add_argument("--tome_ratios", type=list, default=[0.0, 0.5], help="Token merging ratio")
     args = parser.parse_args()
 
     def ddict():
         return defaultdict(ddict)
     runtimes = ddict()
     samples = ddict()
-    set_lowvram_mode(True)
 
     tome_ratios = args.tome_ratios
     profile_visible = args.profile
@@ -377,7 +376,7 @@ def main():
             print(
                 f"ToMe ratio: {tome_ratio:.1f} -- runtime reduction: {time_perc:5.2f}%")
 
-    save_samples_in_grids(args, samples, diffuser=args.diffuser)
+    save_and_evaluate(args, samples, prompts)
 
 
 if __name__ == "__main__":

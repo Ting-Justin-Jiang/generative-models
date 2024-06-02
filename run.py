@@ -275,7 +275,7 @@ def init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=0
     return state
 
 
-def init_and_sampling(args, sampler, prompts, tome_ratio=0.0, profile_visible=True):
+def init_and_sampling(args, sampler, prompts, tome_ratio=0.0, profile_visible=False):
     seed_everything(args.seed)
     print(f"Initializing and sampling with TOME ratio = {tome_ratio} ...")
     version = VERSION2SPECS[args.version]
@@ -284,46 +284,27 @@ def init_and_sampling(args, sampler, prompts, tome_ratio=0.0, profile_visible=Tr
 
     samples, total_runtime, key_average = multi_sampling(args, model, sampler, prompts,
                                               filter=state.get("filter"), profile_visible=profile_visible, is_legacy=version['is_legacy'])
+
     # note that key average is not None only for last sample when profiling
-
     return samples, total_runtime, key_average
-
-
-def init_and_sampling_diffuser(prompts, iterations, tome_ratio=0.0):
-    pipe = DiffusionPipeline.from_pretrained("stabilityai/stable-diffusion-xl-base-1.0",
-                                             torch_dtype=torch.float16,
-                                             use_safetensors=True,
-                                             variant="fp16").to("cuda")
-    if tome_ratio > 0:
-        pipe = tomesd.apply_patch(pipe, ratio=tome_ratio, max_downsample=2)
-
-    total_samples = []
-    start = time.time()
-    for i in range(iterations):
-        single_prompt = prompts[i]
-        image = pipe(prompt=single_prompt).images
-        total_samples.append(image)
-    total_runtime = (time.time() - start)
-
-    return total_samples, total_runtime
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate images with Stable Diffusion XL base.")
     parser.add_argument("--version", choices=VERSION2SPECS.keys(), default="SDXL-base-1.0", help="Model version to use.")
-    parser.add_argument("--n_steps", type=int, default=40, help="Number of sampling steps.")
+    parser.add_argument("--n_steps", type=int, default=50, help="Number of sampling steps.")
     parser.add_argument("--seed", type=int, default=42, help="Seed for random number generation.")
     parser.add_argument("--sampler", default="EulerEDMSampler", help="Sampler configuration.")
     parser.add_argument("--discretization", default="LegacyDDPMDiscretization", help="Discretization configuration.")
     parser.add_argument("--guider", default="VanillaCFG", help="Guider configuration.")
-    parser.add_argument("--diffuser", action=argparse.BooleanOptionalAction, help="Use Huggingface diffuser.")
     parser.add_argument("--profile", action=argparse.BooleanOptionalAction, help="Enable torch profiler.")
     parser.add_argument("--return_latent", action=argparse.BooleanOptionalAction, help="Return last stage latent variable.")
-    parser.add_argument("--tome_ratios", type=list, default=[0.0, 0.25, 0.5, 0.75], help="Token merging ratio")
+    parser.add_argument("--tome_ratios", type=list, default=[0.0, 0.5, 0.7], help="Token merging ratio")
     args = parser.parse_args()
 
     def ddict():
         return defaultdict(ddict)
+
     runtimes = ddict()
     samples = ddict()
     set_lowvram_mode(False)
@@ -337,7 +318,6 @@ def main():
         total_cuda_time = {}
         total_cpu_time = {}
 
-
     # Use model source code
     if args.diffuser is None:
         sampler, _, _ = init_sampler(args)
@@ -348,44 +328,15 @@ def main():
                  args, sampler, prompts, tome_ratio=tome_ratio, profile_visible=profile_visible
             )
             if profile_visible:
-                # TODO plotting function
-                model_sampling_cuda_time = merge_dictionary(key_average,
-                                                            ["0Model: Model_Sampling"],
-                                                            "cuda_time_total",
-                                                            model_sampling_cuda_time
-                                                            )
-                total_cuda_time = merge_dictionary(key_average,
-                                                   ["0Model: Model_Sampling", "0Model: VAE_Decoder"],
-                                                   "cuda_time_total",
-                                                   total_cuda_time
-                                                   )
-                total_cpu_time = merge_dictionary(key_average,
-                                                   ["self_cpu_time_total"],
-                                                   "cuda_time_total",
-                                                   total_cpu_time
-                                                   )
+                model_sampling_cuda_time = merge_dictionary(key_average,["0Model: Model_Sampling"], "cuda_time_total", model_sampling_cuda_time)
+                total_cuda_time = merge_dictionary(key_average, ["0Model: Model_Sampling", "0Model: VAE_Decoder"], "cuda_time_total", total_cuda_time)
+                total_cpu_time = merge_dictionary(key_average,["self_cpu_time_total"], "cuda_time_total", total_cpu_time)
                 print(model_sampling_cuda_time)
                 print(total_cuda_time)
                 print(total_cpu_time)
-
             else:
                 print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
         samples = preprocess_samples(samples)
-
-
-    # TODO add a new branch named interaction
-
-
-    # Use Huggingface Diffuser
-    elif args.diffuser:
-        prompts = PROMPT
-        # tome loop
-        for tome_ratio in tome_ratios:
-            samples[tome_ratio], runtimes[tome_ratio] = init_and_sampling_diffuser(
-                prompts, len(prompts), tome_ratio=tome_ratio
-            )
-            print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
-
 
     ## Print Results
     if runtimes[0] and not profile_visible:
@@ -394,7 +345,6 @@ def main():
             time_perc = 100 * (no_tome_runtime - runtime) / no_tome_runtime
             print(
                 f"ToMe ratio: {tome_ratio:.1f} -- runtime reduction: {time_perc:5.2f}%")
-
 
     print(prompts)
     save_and_evaluate(args, samples, prompts)

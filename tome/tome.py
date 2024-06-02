@@ -26,6 +26,7 @@ def compute_merge(x: torch.Tensor, tome_info: Dict[str, Any]) -> Tuple[Callable,
         # If the batch size is odd, then it's not possible for prompted and unprompted images to be in the same
         # batch, which causes artifacts with use_rand, so force it to be off.
         use_rand = False if x.shape[0] % 2 == 1 else args["use_rand"]
+        # the function defines the indices to merge and unmerge
         m, u = merge.bipartite_soft_matching_random2d(x, w, h, args["sx"], args["sy"], r,
                                                       no_rand=not use_rand, generator=args["generator"])
         message = f"token merging operates at downsample: \033[91m{downsample}\033[0m, original x shape: \033[91m{x.shape}\033[0m, merged: \033[91m{r}\033[0m"
@@ -49,6 +50,8 @@ def make_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.Module]
     class ToMeBlock(block_class):
         # Save for unpatching later
         _parent = block_class
+        # todo add num count 
+        _num = 0
 
         def _forward(self, x: torch.Tensor, context: torch.Tensor = None) -> torch.Tensor:
             m_a, m_c, m_m, u_a, u_c, u_m = compute_merge(x, self._tome_info)
@@ -214,6 +217,7 @@ def apply_patch(
     diffusion_model._tome_info = {
         "size": None,
         "hooks": [],
+        "cache": {}, # key of the dict corresponds to basicTransformer block
         "args": {
             "ratio": ratio,
             "max_downsample": max_downsample,
