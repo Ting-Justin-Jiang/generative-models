@@ -1,6 +1,6 @@
 import argparse
 import time
-from tome import tome as tomesd
+from tome import patch as tomesd
 from collections import defaultdict
 from torch.cuda.amp import autocast
 from torch.profiler import profile, record_function

@@ -104,7 +104,7 @@ def images_to_grid(images, grid_size=None, save_path="output_grid.png"):
 def save_and_evaluate(args, samples, prompts):
     transform = transforms.ToTensor()
     for tome_ratio, images_list in samples.items():
-        save_path = f"output/{args.version}_tome_{tome_ratio}_diffuser_{args.diffuser}.png"
+        save_path = f"output/{args.version}_tome_{tome_ratio}.png"
 
         images_list = images_to_grid(images_list, save_path=save_path)
         images_tensor = np.transpose(np.stack([transform(img) for img in images_list]), (0, 2, 3, 1))

@@ -19,26 +19,19 @@ def mps_gather_workaround(input, dim, index):
 
 def bipartite_soft_matching_random2d(metric: torch.Tensor,
                                      w: int, h: int, sx: int, sy: int, r: int,
+                                     tome_info: dict,
                                      no_rand: bool = False,
-                                     generator: torch.Generator = None) -> Tuple[Callable, Callable]:
-    """
-    Partitions the tokens into src and dst and merges r tokens from src to dst.
-    Dst tokens are partitioned by choosing one randomy in each (sx, sy) region.
-
-    Args:
-     - metric [B, N, C]: metric to use for similarity
-     - w: image width in tokens
-     - h: image height in tokens
-     - sx: stride in the x dimension for dst, must divide w
-     - sy: stride in the y dimension for dst, must divide h
-     - r: number of tokens to remove (by merging)
-     - no_rand: if true, disable randomness (use top left corner only)
-     - rand_seed: if no_rand is false, and if not None, sets random seed.
-    """
+                                     generator: torch.Generator = None,
+                                     cache: any = None,
+                                     rand_indices: torch.Tensor = None) -> Tuple[Callable, Callable]:
     B, N, _ = metric.shape
 
-    if r <= 0:
-        return do_nothing, do_nothing
+    def initial_push(x: torch.Tensor):
+        cache.push(x)
+        return x
+
+    if r <= 0 or cache.feature_map is None:
+        return do_nothing, initial_push
 
     gather = mps_gather_workaround if metric.device.type == "mps" else torch.gather
 
@@ -49,8 +42,11 @@ def bipartite_soft_matching_random2d(metric: torch.Tensor,
         if no_rand:
             rand_idx = torch.zeros(hsy, wsx, 1, device=metric.device, dtype=torch.int64)
         else:
-            rand_idx = torch.randint(sy * sx, size=(hsy, wsx, 1), device=generator.device, generator=generator).to(
-                metric.device)
+            if tome_info['args']['semi_rand_schedule']:
+                # retrieve from a pre-defined semi-random schedule
+                rand_idx = rand_indices[cache.step].to(generator.device)
+            else:
+                rand_idx = torch.randint(sy*sx, size=(hsy, wsx, 1), device=generator.device, generator=generator).to(metric.device)
 
         # The image might not divide sx and sy, so we need to work on a view of the top left if the idx buffer instead
         idx_buffer_view = torch.zeros(hsy, wsx, sy * sx, device=metric.device, dtype=torch.int64)
@@ -82,6 +78,7 @@ def bipartite_soft_matching_random2d(metric: torch.Tensor,
             return src, dst
 
         # Cosine similarity between A and B
+        # todo: Cache cosine similarity here
         metric = metric / metric.norm(dim=-1, keepdim=True)
         a, b = split(metric)
         scores = a @ b.transpose(-1, -2)
@@ -95,7 +92,7 @@ def bipartite_soft_matching_random2d(metric: torch.Tensor,
 
         unm_idx = edge_idx[..., r:, :]  # Unmerged Tokens
         src_idx = edge_idx[..., :r, :]  # Merged Tokens
-        dst_idx = gather(node_idx[..., None], dim=-2, index=src_idx)
+        dst_idx = gather(node_idx[..., None], dim=-2, index=src_idx)  # dst indices src tokens should merge to
 
     def merge(x: torch.Tensor, mode="mean") -> torch.Tensor:
         src, dst = split(x)
@@ -103,8 +100,9 @@ def bipartite_soft_matching_random2d(metric: torch.Tensor,
 
         unm = gather(src, dim=-2, index=unm_idx.expand(n, t1 - r, c))
         src = gather(src, dim=-2, index=src_idx.expand(n, r, c))
-        dst = dst.scatter_reduce(-2, dst_idx.expand(n, r, c), src, reduce=mode)
+        dst = dst.scatter_reduce_(-2, dst_idx.expand(n, r, c), src, reduce=mode)
 
+        # Simply concat
         return torch.cat([unm, dst], dim=1)
 
     def unmerge(x: torch.Tensor) -> torch.Tensor:
@@ -112,7 +110,13 @@ def bipartite_soft_matching_random2d(metric: torch.Tensor,
         unm, dst = x[..., :unm_len, :], x[..., unm_len:, :]
         _, _, c = unm.shape
 
-        src = gather(dst, dim=-2, index=dst_idx.expand(B, r, c))
+        if tome_info['args']['unmerge_residual']:
+            # push the updated dst tokens to cache, and pop the src tokens store in cache
+            cache.push(dst, index=b_idx.expand(B, num_dst, c))
+            src = cache.pop(index=gather(a_idx.expand(B, a_idx.shape[1], 1), dim=1, index=src_idx).expand(B, r, c))
+        else:
+            # vanilla tome unmerging
+            src = gather(dst, dim=-2, index=dst_idx.expand(B, r, c))
 
         # Combine back to the original shape
         out = torch.zeros(B, N, c, device=x.device, dtype=x.dtype)

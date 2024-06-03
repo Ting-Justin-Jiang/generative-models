@@ -1,6 +1,6 @@
 import argparse
 import time
-from tome import tome as tomesd
+from tome import patch as tomesd
 from collections import defaultdict
 from torch.cuda.amp import autocast
 from torch.profiler import profile, record_function
@@ -150,7 +150,7 @@ def do_sample(
 
 
 def multi_sampling(args, model, sampler, prompts, filter=None,
-                   profile_visible=False, is_legacy=False, return_latents=False):
+                   profile_visible=False, is_legacy=False, return_latents=False, tome_ratio=0.0):
     """
     Profile multiple sampling processes.
     - profile_visible: If True, perform profiling only on the last iteration.
@@ -171,7 +171,7 @@ def multi_sampling(args, model, sampler, prompts, filter=None,
     total_samples = []
     total_runtime = 0
 
-    actual_iterations = 4 if profile_visible else len(prompts)
+    actual_iterations = 2 if profile_visible else len(prompts)
 
     for i in range(actual_iterations):
         profile_this_iter = profile_visible if i == actual_iterations - 1 else False
@@ -209,6 +209,9 @@ def multi_sampling(args, model, sampler, prompts, filter=None,
             .numpy()
         )
         total_samples.append(samples)
+
+        if tome_ratio > 0.0:
+            tomesd.reset_cache(model)
 
     return total_samples, total_runtime, key_average
 
@@ -261,10 +264,11 @@ def init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=0
         model, msg = load_model_from_config(config, ckpt if load_ckpt else None)
 
         if tome_ratio > 0.0:
-            model = tomesd.apply_patch(model,
-                                       ratio=tome_ratio,
-                                       sx=2, sy=2,
-                                       max_downsample=2)
+            model = tomesd.apply_patch(model, ratio=tome_ratio, sx=2, sy=2, max_downsample=1,
+                                       semi_rand_schedule=True,
+                                       unmerge_residual=True,
+                                       cache_similarity=False,
+                                       partial_attention=False)
 
         state["msg"] = msg
         state["model"] = model
@@ -283,7 +287,7 @@ def init_and_sampling(args, sampler, prompts, tome_ratio=0.0, profile_visible=Fa
     model = state["model"]
 
     samples, total_runtime, key_average = multi_sampling(args, model, sampler, prompts,
-                                              filter=state.get("filter"), profile_visible=profile_visible, is_legacy=version['is_legacy'])
+                                              filter=state.get("filter"), profile_visible=profile_visible, is_legacy=version['is_legacy'], tome_ratio=tome_ratio)
 
     # note that key average is not None only for last sample when profiling
     return samples, total_runtime, key_average
@@ -291,15 +295,19 @@ def init_and_sampling(args, sampler, prompts, tome_ratio=0.0, profile_visible=Fa
 
 def main():
     parser = argparse.ArgumentParser(description="Generate images with Stable Diffusion XL base.")
-    parser.add_argument("--version", choices=VERSION2SPECS.keys(), default="SDXL-base-1.0", help="Model version to use.")
-    parser.add_argument("--n_steps", type=int, default=50, help="Number of sampling steps.")
-    parser.add_argument("--seed", type=int, default=42, help="Seed for random number generation.")
+
+    parser.add_argument("--version", choices=VERSION2SPECS.keys(), default="SD-2.1-768", help="Model version to use.")
+    parser.add_argument("--n_steps", type=int, default=64, help="Number of sampling steps.")
+    parser.add_argument("--seed", type=int, default=0, help="Seed for random number generation.")
+
     parser.add_argument("--sampler", default="EulerEDMSampler", help="Sampler configuration.")
     parser.add_argument("--discretization", default="LegacyDDPMDiscretization", help="Discretization configuration.")
     parser.add_argument("--guider", default="VanillaCFG", help="Guider configuration.")
+
     parser.add_argument("--profile", action=argparse.BooleanOptionalAction, help="Enable torch profiler.")
     parser.add_argument("--return_latent", action=argparse.BooleanOptionalAction, help="Return last stage latent variable.")
-    parser.add_argument("--tome_ratios", type=list, default=[0.0, 0.5, 0.7], help="Token merging ratio")
+    parser.add_argument("--tome_ratios", type=list, default=[0, 0.25, 0.5, 0.75], help="Token merging ratio")
+
     args = parser.parse_args()
 
     def ddict():
@@ -319,24 +327,24 @@ def main():
         total_cpu_time = {}
 
     # Use model source code
-    if args.diffuser is None:
-        sampler, _, _ = init_sampler(args)
-        prompts = PROMPT
+    sampler, _, _ = init_sampler(args)
+    prompts = PROMPT
 
-        for tome_ratio in tome_ratios:
-            samples[tome_ratio], runtimes[tome_ratio], key_average = init_and_sampling(
-                 args, sampler, prompts, tome_ratio=tome_ratio, profile_visible=profile_visible
-            )
-            if profile_visible:
-                model_sampling_cuda_time = merge_dictionary(key_average,["0Model: Model_Sampling"], "cuda_time_total", model_sampling_cuda_time)
-                total_cuda_time = merge_dictionary(key_average, ["0Model: Model_Sampling", "0Model: VAE_Decoder"], "cuda_time_total", total_cuda_time)
-                total_cpu_time = merge_dictionary(key_average,["self_cpu_time_total"], "cuda_time_total", total_cpu_time)
-                print(model_sampling_cuda_time)
-                print(total_cuda_time)
-                print(total_cpu_time)
-            else:
-                print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
-        samples = preprocess_samples(samples)
+    for tome_ratio in tome_ratios:
+        samples[tome_ratio], runtimes[tome_ratio], key_average = init_and_sampling(
+             args, sampler, prompts, tome_ratio=tome_ratio, profile_visible=profile_visible
+        )
+        if profile_visible:
+            model_sampling_cuda_time = merge_dictionary(key_average,["0Model: Model_Sampling"], "cuda_time_total", model_sampling_cuda_time)
+            total_cuda_time = merge_dictionary(key_average, ["0Model: Model_Sampling", "0Model: VAE_Decoder"], "cuda_time_total", total_cuda_time)
+            total_cpu_time = merge_dictionary(key_average,["self_cpu_time_total"], "cuda_time_total", total_cpu_time)
+            print(model_sampling_cuda_time)
+            print(total_cuda_time)
+            print(total_cpu_time)
+        else:
+            print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
+
+    samples = preprocess_samples(samples)
 
     ## Print Results
     if runtimes[0] and not profile_visible:
@@ -348,7 +356,6 @@ def main():
 
     print(prompts)
     save_and_evaluate(args, samples, prompts)
-
 
 if __name__ == "__main__":
     main()
