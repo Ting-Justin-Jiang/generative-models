@@ -8,7 +8,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from torch.utils.checkpoint import checkpoint
-from torch.profiler import profile, record_function, ProfilerActivity
 
 from ...modules.attention import SpatialTransformer
 from ...modules.diffusionmodules.util import (avg_pool_nd, conv_nd, linear,

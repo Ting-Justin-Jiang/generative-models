@@ -1,5 +1,5 @@
 from scripts.demo.streamlit_helpers import *
-import sys
+import os
 import random
 import torch.nn.functional as F
 from torchvision import transforms
@@ -42,30 +42,6 @@ def merge_dictionary(events, keywords, column, merged_dict):
     return merged_dict
 
 
-def clamp(x: int, min: int, max: int) -> int:
-    if x < min:
-        return min
-    elif x > max:
-        return max
-    else:
-        return x
-
-
-def seed_torch(seed) -> None:
-    """
-    set random seed for all related packages
-    """
-    os.environ['PYTHONHASHSEED'] = str(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    if hasattr(torch, 'backends'):
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-
 def preprocess_samples(samples):
     processed_samples = {}
     for tome_ratio, image_arrays in samples.items():
@@ -103,8 +79,10 @@ def images_to_grid(images, grid_size=None, save_path="output_grid.png"):
 
 def save_and_evaluate(args, samples, prompts):
     transform = transforms.ToTensor()
+    os.makedirs(args.experiment_folder, exist_ok=True)
     for tome_ratio, images_list in samples.items():
-        save_path = f"output/{args.version}_tome_{tome_ratio}.png"
+        save_path = (f"{args.experiment_folder}/{args.version}_merge_ratio_{tome_ratio}_"
+                     f"unmerge_residual_{args.unmerge_residual}_push_unmerged_{args.push_unmerged}.png")
 
         images_list = images_to_grid(images_list, save_path=save_path)
         images_tensor = np.transpose(np.stack([transform(img) for img in images_list]), (0, 2, 3, 1))
@@ -150,7 +128,7 @@ def get_guider(guider, options, key):
             "target": "sgm.modules.diffusionmodules.guiders.IdentityGuider"
         }
     elif guider == "VanillaCFG":
-        scale = options.get("cfg_scale", 9.0)
+        scale = options.get("cfg_scale", 7.0)
         guider_config = {
             "target": "sgm.modules.diffusionmodules.guiders.VanillaCFG",
             "params": {

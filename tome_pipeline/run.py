@@ -1,11 +1,11 @@
 import argparse
 import time
-from tome import patch as tomesd
+from tomesd import patch as tome
+from tome import patch as improved_tome
 from collections import defaultdict
 from torch.cuda.amp import autocast
-from torch.profiler import profile, record_function
-from util_debug import *
-from turbo_prompt import PROMPT
+from util_pipeline import *
+from prompt import PROMPT
 from pytorch_lightning import seed_everything
 
 VERSION2SPECS = {
@@ -66,8 +66,7 @@ def do_sample(
     filter=None,
     T=None,
     additional_batch_uc_fields=None,
-    decoding_t=None,
-    profile_visible=False
+    decoding_t=None
 ):
     force_uc_zero_embeddings = default(force_uc_zero_embeddings, [])
     additional_batch_uc_fields = default(additional_batch_uc_fields, [])
@@ -115,27 +114,9 @@ def do_sample(
                         model.model, input, sigma, c
                     )
 
-                # torch profile On/Off
-                if profile_visible:
-                    with profile(activities=[
-                        torch.profiler.ProfilerActivity.CPU,
-                        torch.profiler.ProfilerActivity.CUDA,
-                    ]) as prof:
-                        with record_function("0Model: Model_Sampling"):
-                            samples_z = sampler(denoiser, randn, cond=c, uc=uc)
-                        model.en_and_decode_n_samples_a_time = decoding_t
-                        with record_function("0Model: VAE_Decoder"):
-                            samples_x = model.decode_first_stage(samples_z)
-
-                else:
-                    samples_z = sampler(denoiser, randn, cond=c, uc=uc)
-                    model.en_and_decode_n_samples_a_time = decoding_t
-                    samples_x = model.decode_first_stage(samples_z)
-
-                key_average = None
-                if profile_visible:
-                    key_average = prof.key_averages()
-                    print(key_average.table(sort_by="cuda_time_total"))
+                samples_z = sampler(denoiser, randn, cond=c, uc=uc)
+                model.en_and_decode_n_samples_a_time = decoding_t
+                samples_x = model.decode_first_stage(samples_z)
 
                 samples = torch.clamp((samples_x + 1.0) / 2.0, min=0.0, max=1.0)
 
@@ -144,15 +125,11 @@ def do_sample(
 
                 if return_latents:
                     return samples, samples_z
-                return samples, key_average
+                return samples
 
 
 def multi_sampling(args, model, sampler, prompts, filter=None,
-                   profile_visible=False, is_legacy=False, return_latents=False, tome_ratio=0.0):
-    """
-    Profile multiple sampling processes.
-    - profile_visible: If True, perform profiling only on the last iteration.
-    """
+                   is_legacy=False, return_latents=False, tome_ratio=0.0):
     version_dict = VERSION2SPECS[args.version]
     W = version_dict['W']
     H = version_dict['H']
@@ -169,13 +146,7 @@ def multi_sampling(args, model, sampler, prompts, filter=None,
     total_samples = []
     total_runtime = 0
 
-    actual_iterations = 2 if profile_visible else len(prompts)
-
-    for i in range(actual_iterations):
-        profile_this_iter = profile_visible if i == actual_iterations - 1 else False
-
-        single_prompt = prompts[0] if profile_visible and len(prompts) == 1 else prompts[i % len(prompts)]
-
+    for single_prompt in prompts:
         # no negative_prompt required for XL
         value_dict = init_embedder_options(
             get_unique_embedder_keys_from_conditioner(model.conditioner),
@@ -187,13 +158,12 @@ def multi_sampling(args, model, sampler, prompts, filter=None,
         # set to 1 for lower GPU burden
         num_samples = 1
         start = time.time()
-        samples, key_average = do_sample(model, sampler, value_dict,
+        samples = do_sample(model, sampler, value_dict,
                                 num_samples,
                                 H, W, C, F,
                                 force_uc_zero_embeddings=["txt"] if not is_legacy else [],
                                 return_latents=return_latents,
-                                filter=filter,
-                                profile_visible=profile_this_iter
+                                filter=filter
                                 )
         single_runtime = (time.time() - start)
         total_runtime += single_runtime
@@ -209,9 +179,9 @@ def multi_sampling(args, model, sampler, prompts, filter=None,
         total_samples.append(samples)
 
         if tome_ratio > 0.0:
-            model = tomesd.reset_cache(model)
+            model = improved_tome.reset_cache(model)
 
-    return total_samples, total_runtime, key_average
+    return total_samples, total_runtime
 
 
 def load_model_from_config(config, ckpt=None, verbose=True):
@@ -251,8 +221,7 @@ def load_model_from_config(config, ckpt=None, verbose=True):
     return model, msg
 
 
-@st.cache_resource()
-def init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=0.5):
+def init_without_st(args, version_dict, load_ckpt=True, load_filter=True, tome_ratio=0.5):
     state = dict()
     if not "model" in state:
         config = version_dict["config"]
@@ -262,15 +231,17 @@ def init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=0
         model, msg = load_model_from_config(config, ckpt if load_ckpt else None)
 
         if tome_ratio > 0.0:
-            model = tomesd.apply_patch(model, ratio=tome_ratio, sx=2, sy=2, max_downsample=4,
-                                       merge_attn=True,
-                                       merge_crossattn=False,
+            model = improved_tome.apply_patch(model, ratio=tome_ratio, sx=2, sy=2, max_downsample=4,
+                                               merge_attn=True,
+                                               merge_mlp=False,
+                                               merge_crossattn=False,
 
-                                       semi_rand_schedule=True,
-                                       unmerge_residual=True,
-                                       push_unmerged=True,
-                                       cache_similarity=False,
-                                       partial_attention=False)
+                                               # == Improvement Configuration
+                                               semi_rand_schedule=args.semi_rand_schedule,
+                                               unmerge_residual=args.unmerge_residual,
+                                               push_unmerged=args.push_unmerged,
+                                               partial_attention=args.partial_attention)
+
 
         state["msg"] = msg
         state["model"] = model
@@ -281,18 +252,17 @@ def init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=0
     return state
 
 
-def init_and_sampling(args, sampler, prompts, tome_ratio=0.0, profile_visible=False):
+def init_and_sampling(args, sampler, prompts, tome_ratio=0.0):
     seed_everything(args.seed)
     print(f"Initializing and sampling with TOME ratio = {tome_ratio} ...")
     version = VERSION2SPECS[args.version]
-    state = init_without_st(version, load_ckpt=True, load_filter=True, tome_ratio=tome_ratio)
+    state = init_without_st(args, version, load_ckpt=True, load_filter=True, tome_ratio=tome_ratio)
     model = state["model"]
 
-    samples, total_runtime, key_average = multi_sampling(args, model, sampler, prompts,
-                                              filter=state.get("filter"), profile_visible=profile_visible, is_legacy=version['is_legacy'], tome_ratio=tome_ratio)
+    samples, total_runtime = multi_sampling(args, model, sampler, prompts,
+                                            filter=state.get("filter"), is_legacy=version['is_legacy'], tome_ratio=tome_ratio)
 
-    # note that key average is not None only for last sample when profiling
-    return samples, total_runtime, key_average
+    return samples, total_runtime
 
 
 def main():
@@ -306,10 +276,17 @@ def main():
     parser.add_argument("--discretization", default="LegacyDDPMDiscretization", help="Discretization configuration.")
     parser.add_argument("--guider", default="VanillaCFG", help="Guider configuration.")
 
-    parser.add_argument("--profile", action=argparse.BooleanOptionalAction, help="Enable torch profiler.")
     parser.add_argument("--return_latent", action=argparse.BooleanOptionalAction, help="Return last stage latent variable.")
 
-    parser.add_argument("--tome_ratios", type=list, default=[0, 0.25, 0.5, 0.75], help="Token merging ratio")
+    # == Token Merging Configuration == #
+    parser.add_argument("--experiment-folder", type=str, default="output/inference")
+    parser.add_argument("--tome_ratios", type=list, default=[0.0, 0.5, 0.75], help="Token merging ratio")
+
+    # == Improvements == #
+    parser.add_argument("--semi-rand-schedule", action=argparse.BooleanOptionalAction, type=bool, default=True)
+    parser.add_argument("--unmerge-residual", action=argparse.BooleanOptionalAction, type=bool, default=True)
+    parser.add_argument("--push-unmerged", action=argparse.BooleanOptionalAction, type=bool, default=False)
+    parser.add_argument("--partial-attention", action=argparse.BooleanOptionalAction, type=bool, default=False)
 
     args = parser.parse_args()
 
@@ -321,36 +298,19 @@ def main():
     set_lowvram_mode(False)
 
     tome_ratios = args.tome_ratios
-    profile_visible = args.profile
-    if profile_visible:
-        assert args.diffuser is None, "Assertion: Unable to initialize profile with diffuser"
-        print("Profiling with torch.profiler ...")
-        model_sampling_cuda_time = {}
-        total_cuda_time = {}
-        total_cpu_time = {}
 
     # Use model source code
     sampler, _, _ = init_sampler(args)
     prompts = PROMPT
 
     for tome_ratio in tome_ratios:
-        samples[tome_ratio], runtimes[tome_ratio], key_average = init_and_sampling(
-             args, sampler, prompts, tome_ratio=tome_ratio, profile_visible=profile_visible
-        )
-        if profile_visible:
-            model_sampling_cuda_time = merge_dictionary(key_average,["0Model: Model_Sampling"], "cuda_time_total", model_sampling_cuda_time)
-            total_cuda_time = merge_dictionary(key_average, ["0Model: Model_Sampling", "0Model: VAE_Decoder"], "cuda_time_total", total_cuda_time)
-            total_cpu_time = merge_dictionary(key_average,["self_cpu_time_total"], "cuda_time_total", total_cpu_time)
-            print(model_sampling_cuda_time)
-            print(total_cuda_time)
-            print(total_cpu_time)
-        else:
-            print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
+        samples[tome_ratio], runtimes[tome_ratio] = init_and_sampling(args, sampler, prompts, tome_ratio=tome_ratio)
+        print(f"\t\tRuntime: {runtimes[tome_ratio]:.3f}")
 
     samples = preprocess_samples(samples)
 
     ## Print Results
-    if runtimes[0] and not profile_visible:
+    if runtimes[0]:
         for tome_ratio, runtime in runtimes.items():
             no_tome_runtime = runtimes[0]
             time_perc = 100 * (no_tome_runtime - runtime) / no_tome_runtime

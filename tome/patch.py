@@ -1,6 +1,5 @@
 DEBUG_MODE: bool = True
 import torch
-import logging
 import math
 import tome.merge as merge
 from typing import Type, Dict, Any, Tuple, Callable
@@ -13,7 +12,6 @@ class CacheBus:
     def __init__(self):
         self.feature_maps = {} # key: index, value: feature_maps
         self.rand_indices = {} # key: downsampling (for partial attention) / block_index, value: rand_idx
-        self.similarity_scores = {} # key:  downsampling, value: similarity_scores
 
 
 class Cache:
@@ -65,13 +63,13 @@ def compute_merge(x: torch.Tensor, tome_info: Dict[str, Any], cache: Cache) -> T
         if tome_info['args']['semi_rand_schedule']:
             if not tome_info['args']['partial_attention']:
                 if cache.index not in cache.cache_bus.rand_indices:
-                    rand_indices = generate_semi_random_indices(tome_info["args"]['sx'], tome_info["args"]['sy'], h, w, steps=128)
+                    rand_indices = generate_semi_random_indices(tome_info["args"]['sx'], tome_info["args"]['sy'], h, w, steps=64)
                     cache.cache_bus.rand_indices[cache.index] = rand_indices
                 else:
                     rand_indices = cache.cache_bus.rand_indices[cache.index]
             else:
                 if downsample not in cache.cache_bus.rand_indices:
-                    rand_indices = generate_semi_random_indices(tome_info["args"]['sx'], tome_info["args"]['sy'], h, w, steps=128)
+                    rand_indices = generate_semi_random_indices(tome_info["args"]['sx'], tome_info["args"]['sy'], h, w, steps=64)
                     cache.cache_bus.rand_indices[downsample] = rand_indices
                 else:
                     rand_indices = cache.cache_bus.rand_indices[downsample]
@@ -183,7 +181,6 @@ def apply_patch(
         semi_rand_schedule: bool = False,
         unmerge_residual: bool = False,
         push_unmerged: bool = False,
-        cache_similarity: bool = False,
         partial_attention: bool = False,
 ):
     # == merging preparation ==
@@ -197,7 +194,6 @@ def apply_patch(
         f"merge_mlp: {merge_mlp}\n"
         f"semi_rand_schedule: {semi_rand_schedule}\n"
         f"unmerge_residual: {unmerge_residual}\n"
-        f"cache_similarity: {cache_similarity}\n"
         f"partial_attention: {partial_attention}\n"
         f"push_unmerged: {push_unmerged} "
         f"\033[0m"
@@ -205,8 +201,6 @@ def apply_patch(
 
     if not semi_rand_schedule:
         assert partial_attention is False, "Cannot apply partial attention without merging scheduler"
-    if cache_similarity:
-        assert partial_attention is True, "Cannot cache similarity without partial attention"
 
     # == initialization ==
     # Make sure the module is not currently patched
@@ -234,7 +228,6 @@ def apply_patch(
             "semi_rand_schedule": semi_rand_schedule,
             "unmerge_residual": unmerge_residual,
             "push_unmerged": push_unmerged,
-            "cache_similarity": cache_similarity,
             "partial_attention": partial_attention
         }
     }

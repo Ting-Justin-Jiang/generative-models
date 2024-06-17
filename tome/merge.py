@@ -107,8 +107,8 @@ def bipartite_soft_matching_random2d(metric: torch.Tensor,
 
         # Simply concat
         out = torch.cat([unm, dst], dim=1)
-        print(f"\033[96mMerge\033[0m: feature map merged from \033[95m{x.shape}\033[0m to \033[95m{out.shape}\033[0m "
-                      f"at block index: \033[91m{cache.index}\033[0m")
+        # print(f"\033[96mMerge\033[0m: feature map merged from \033[95m{x.shape}\033[0m to \033[95m{out.shape}\033[0m "
+        #               f"at block index: \033[91m{cache.index}\033[0m")
         return out
 
     def unmerge(x: torch.Tensor) -> torch.Tensor:

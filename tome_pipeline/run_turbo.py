@@ -4,9 +4,9 @@ from tome import patch as tomesd
 from collections import defaultdict
 from torch.cuda.amp import autocast
 from torch.profiler import profile, record_function
-from util_debug import *
+from util_pipeline import *
 from diffusers import AutoPipelineForText2Image
-from turbo_prompt import PROMPT
+from prompt import PROMPT
 from pytorch_lightning import seed_everything
 
 

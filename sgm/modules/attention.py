@@ -9,7 +9,6 @@ from einops import rearrange, repeat
 from packaging import version
 from torch import nn
 from torch.utils.checkpoint import checkpoint
-from torch.profiler import profile, record_function, ProfilerActivity
 
 logpy = logging.getLogger(__name__)
 
