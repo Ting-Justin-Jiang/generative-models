@@ -1,4 +1,5 @@
 import torch
+import logging
 from typing import Tuple, Callable
 
 
@@ -30,7 +31,10 @@ def bipartite_soft_matching_random2d(metric: torch.Tensor,
         cache.push(x)
         return x
 
-    if r <= 0 or cache.feature_map is None:
+    if r <= 0:
+        return do_nothing, do_nothing
+
+    if cache.feature_map is None and tome_info['args']['unmerge_residual']:
         return do_nothing, initial_push
 
     gather = mps_gather_workaround if metric.device.type == "mps" else torch.gather
@@ -78,7 +82,6 @@ def bipartite_soft_matching_random2d(metric: torch.Tensor,
             return src, dst
 
         # Cosine similarity between A and B
-        # todo: Cache cosine similarity here
         metric = metric / metric.norm(dim=-1, keepdim=True)
         a, b = split(metric)
         scores = a @ b.transpose(-1, -2)
@@ -103,7 +106,10 @@ def bipartite_soft_matching_random2d(metric: torch.Tensor,
         dst = dst.scatter_reduce_(-2, dst_idx.expand(n, r, c), src, reduce=mode)
 
         # Simply concat
-        return torch.cat([unm, dst], dim=1)
+        out = torch.cat([unm, dst], dim=1)
+        print(f"\033[96mMerge\033[0m: feature map merged from \033[95m{x.shape}\033[0m to \033[95m{out.shape}\033[0m "
+                      f"at block index: \033[91m{cache.index}\033[0m")
+        return out
 
     def unmerge(x: torch.Tensor) -> torch.Tensor:
         unm_len = unm_idx.shape[1]
@@ -113,9 +119,12 @@ def bipartite_soft_matching_random2d(metric: torch.Tensor,
         if tome_info['args']['unmerge_residual']:
             # push the updated dst tokens to cache, and pop the src tokens store in cache
             cache.push(dst, index=b_idx.expand(B, num_dst, c))
+            if tome_info['args']['push_unmerged']:
+                # maybe...just maybe, we should also push unmerged
+                cache.push(unm, index=gather(a_idx.expand(B, a_idx.shape[1], 1), dim=1, index=unm_idx).expand(B, unm_len, c))
             src = cache.pop(index=gather(a_idx.expand(B, a_idx.shape[1], 1), dim=1, index=src_idx).expand(B, r, c))
         else:
-            # vanilla tome unmerging
+            # vanilla unmerging
             src = gather(dst, dim=-2, index=dst_idx.expand(B, r, c))
 
         # Combine back to the original shape

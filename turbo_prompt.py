@@ -1009,8 +1009,13 @@
 #     PROMPT.append(f"A high quality photograph of a {class_names[cls]}.")
 
 PROMPT=[
- "A cat wearing Roman Empire Armor",
- "A cat standing on Mars",
- "A cat in a white dress",
- "A cat sitting under cherry blossom"
+ "Photograph of a cat in a white dress",
+ "Photograph of a cat standing on Mars",
+ "Photograph of a cat wearing hawaii shirt and sunglasses",
+ "Anime of a cat sitting under cherry blossom",
+ "Photograph of a cat wearing Roman Empire Armor",
+ "Photograph of a cat wearing polo shirt",
+ "Anime of a cat wearing coat and scarf in snow",
+ "Photograph of a cat surfing",
+ "Photograph of a cat on a throne"
 ]

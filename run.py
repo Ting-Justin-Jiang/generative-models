@@ -5,10 +5,8 @@ from collections import defaultdict
 from torch.cuda.amp import autocast
 from torch.profiler import profile, record_function
 from util_debug import *
-from diffusers import DiffusionPipeline
 from turbo_prompt import PROMPT
 from pytorch_lightning import seed_everything
-from torchmetrics.functional.multimodal import clip_score
 
 VERSION2SPECS = {
     "SDXL-base-1.0": {
@@ -38,7 +36,7 @@ def init_sampler(
     specify_num_samples: bool = True,
     options: Optional[Dict[str, int]] = None,
 ):
-    options = {} if options is None else options
+    options = {"cfg_scale": 7.0} if options is None else options
 
     # only support 1 sample currently
     num_rows, num_cols = 1, 1
@@ -211,7 +209,7 @@ def multi_sampling(args, model, sampler, prompts, filter=None,
         total_samples.append(samples)
 
         if tome_ratio > 0.0:
-            tomesd.reset_cache(model)
+            model = tomesd.reset_cache(model)
 
     return total_samples, total_runtime, key_average
 
@@ -264,9 +262,13 @@ def init_without_st(version_dict, load_ckpt=True, load_filter=True, tome_ratio=0
         model, msg = load_model_from_config(config, ckpt if load_ckpt else None)
 
         if tome_ratio > 0.0:
-            model = tomesd.apply_patch(model, ratio=tome_ratio, sx=2, sy=2, max_downsample=1,
+            model = tomesd.apply_patch(model, ratio=tome_ratio, sx=2, sy=2, max_downsample=4,
+                                       merge_attn=True,
+                                       merge_crossattn=False,
+
                                        semi_rand_schedule=True,
                                        unmerge_residual=True,
+                                       push_unmerged=True,
                                        cache_similarity=False,
                                        partial_attention=False)
 
@@ -296,8 +298,8 @@ def init_and_sampling(args, sampler, prompts, tome_ratio=0.0, profile_visible=Fa
 def main():
     parser = argparse.ArgumentParser(description="Generate images with Stable Diffusion XL base.")
 
-    parser.add_argument("--version", choices=VERSION2SPECS.keys(), default="SD-2.1-768", help="Model version to use.")
-    parser.add_argument("--n_steps", type=int, default=64, help="Number of sampling steps.")
+    parser.add_argument("--version", choices=VERSION2SPECS.keys(), default="SDXL-base-1.0", help="Model version to use.")
+    parser.add_argument("--n_steps", type=int, default=50, help="Number of sampling steps.")
     parser.add_argument("--seed", type=int, default=0, help="Seed for random number generation.")
 
     parser.add_argument("--sampler", default="EulerEDMSampler", help="Sampler configuration.")
@@ -306,6 +308,7 @@ def main():
 
     parser.add_argument("--profile", action=argparse.BooleanOptionalAction, help="Enable torch profiler.")
     parser.add_argument("--return_latent", action=argparse.BooleanOptionalAction, help="Return last stage latent variable.")
+
     parser.add_argument("--tome_ratios", type=list, default=[0, 0.25, 0.5, 0.75], help="Token merging ratio")
 
     args = parser.parse_args()

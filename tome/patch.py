@@ -1,8 +1,11 @@
+DEBUG_MODE: bool = True
 import torch
+import logging
 import math
 import tome.merge as merge
 from typing import Type, Dict, Any, Tuple, Callable
 from tomesd.utils import isinstance_str, init_generator
+
 
 
 class CacheBus:
@@ -14,7 +17,7 @@ class CacheBus:
 
 
 class Cache:
-    def __init__(self, cache_bus: CacheBus, index: int):
+    def __init__(self, index: int, cache_bus: CacheBus):
         self.cache_bus = cache_bus
         self.feature_map = None
         self.index = index
@@ -42,7 +45,8 @@ def compute_merge(x: torch.Tensor, tome_info: Dict[str, Any], cache: Cache) -> T
 
     args = tome_info["args"]
 
-    if downsample <= args["max_downsample"]:
+    # in SDXL, this is actually "min_downsample"
+    if downsample >= args["max_downsample"]:
         w = int(math.ceil(original_w / downsample))
         h = int(math.ceil(original_h / downsample))
         r = int(x.shape[1] * args["ratio"])
@@ -57,7 +61,7 @@ def compute_merge(x: torch.Tensor, tome_info: Dict[str, Any], cache: Cache) -> T
         # batch, which causes artifacts with use_rand, so force it to be off.
         use_rand = False if x.shape[0] % 2 == 1 else args["use_rand"]
 
-        # retrieve semi-random merging schedule
+        # retrieve (or create) semi-random merging schedule
         if tome_info['args']['semi_rand_schedule']:
             if not tome_info['args']['partial_attention']:
                 if cache.index not in cache.cache_bus.rand_indices:
@@ -78,10 +82,8 @@ def compute_merge(x: torch.Tensor, tome_info: Dict[str, Any], cache: Cache) -> T
         m, u = merge.bipartite_soft_matching_random2d(x, w, h, args["sx"], args["sy"], r, tome_info,
                                                       no_rand=not use_rand, generator=args["generator"],
                                                       cache=cache, rand_indices=rand_indices)
-        message = f"token merging operates at downsample: \033[91m{downsample}\033[0m, original x shape: \033[91m{x.shape}\033[0m, merged: \033[91m{r}\033[0m"
     else:
         m, u = (merge.do_nothing, merge.do_nothing)
-        message = "token merging does nothing"
 
     m_a, u_a = (m, u) if args["merge_attn"] else (merge.do_nothing, merge.do_nothing)
     m_c, u_c = (m, u) if args["merge_crossattn"] else (merge.do_nothing, merge.do_nothing)
@@ -103,17 +105,11 @@ def make_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.Module]
         def _forward(self, x: torch.Tensor, context: torch.Tensor = None) -> torch.Tensor:
             m_a, m_c, m_m, u_a, u_c, u_m = compute_merge(x, self._tome_info, self._cache)
 
-            # This is where the meat of the computation happens
-            # self attention
-            x_a = m_a(self.norm1(x))
-            x_a = self.attn1(x_a, context=context if self.disable_self_attn else None)
-            x = u_a(x_a) + x
-
+            x = u_a(self.attn1(m_a(self.norm1(x)), context=context if self.disable_self_attn else None)) + x
             x = u_c(self.attn2(m_c(self.norm2(x)), context=context)) + x
             x = u_m(self.ff(m_m(self.norm3(x)))) + x
 
             self._cache.step += 1
-
             return x
 
     return ToMeBlock
@@ -129,7 +125,7 @@ def hook_tome_model(model: torch.nn.Module):
     model._tome_info["hooks"].append(model.register_forward_pre_hook(hook))
 
 
-def generate_semi_random_indices(sy, sx, h, w, steps):
+def generate_semi_random_indices(sy, sx, h, w, steps) -> torch.Tensor:
     """
     generates a semi-random merging schedule given the grid size
     """
@@ -152,17 +148,26 @@ def generate_semi_random_indices(sy, sx, h, w, steps):
 
 
 def reset_cache(model: torch.nn.Module):
+    # remove patch
+    remove_patch(model)
     diffusion_model = model.model.diffusion_model
+
+    # re-initialize patches
+    hook_tome_model(diffusion_model)
     bus = CacheBus()
     index = 0
     for _, module in diffusion_model.named_modules():
-        # If for some reason this has a different name, create an issue and I'll fix it
-        if isinstance_str(module, "ToMeBlock"):
+        if isinstance_str(module, "BasicTransformerBlock"):
+            module.__class__ = make_tome_block(module.__class__)
+            module._tome_info = diffusion_model._tome_info
             module._cache = Cache(cache_bus=bus, index=index)
-            index += 1
-    print(f"Reset cache for {index} BasicTransformerBlock")
-    return model
 
+            index += 1
+
+            if not hasattr(module, "disable_self_attn"):
+                module.disable_self_attn = False
+
+    return model
 
 def apply_patch(
         model: torch.nn.Module,
@@ -177,15 +182,33 @@ def apply_patch(
         # == Cache Merge ablation arguments == #
         semi_rand_schedule: bool = False,
         unmerge_residual: bool = False,
+        push_unmerged: bool = False,
         cache_similarity: bool = False,
         partial_attention: bool = False,
 ):
+    # == merging preparation ==
+    print('\033[94mApplying Token Merging\033[0m')
+    print(
+        "\033[96mArguments:\n"
+        f"max_downsample: {max_downsample}\n"
+        f"ratio: {ratio}\n"
+        f"sx: {sx}, sy: {sy}\n"
+        f"use_rand: {use_rand}\n"
+        f"merge_mlp: {merge_mlp}\n"
+        f"semi_rand_schedule: {semi_rand_schedule}\n"
+        f"unmerge_residual: {unmerge_residual}\n"
+        f"cache_similarity: {cache_similarity}\n"
+        f"partial_attention: {partial_attention}\n"
+        f"push_unmerged: {push_unmerged} "
+        f"\033[0m"
+    )
 
     if not semi_rand_schedule:
         assert partial_attention is False, "Cannot apply partial attention without merging scheduler"
     if cache_similarity:
         assert partial_attention is True, "Cannot cache similarity without partial attention"
 
+    # == initialization ==
     # Make sure the module is not currently patched
     remove_patch(model)
 
@@ -210,6 +233,7 @@ def apply_patch(
             # == Cache Merge ablation arguments == #
             "semi_rand_schedule": semi_rand_schedule,
             "unmerge_residual": unmerge_residual,
+            "push_unmerged": push_unmerged,
             "cache_similarity": cache_similarity,
             "partial_attention": partial_attention
         }
@@ -232,7 +256,6 @@ def apply_patch(
             if not hasattr(module, "disable_self_attn"):
                 module.disable_self_attn = False
 
-    print(f"Applied merging patch for BasicTransformerBlock")
     return model
 
 

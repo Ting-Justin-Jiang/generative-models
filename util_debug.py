@@ -150,7 +150,7 @@ def get_guider(guider, options, key):
             "target": "sgm.modules.diffusionmodules.guiders.IdentityGuider"
         }
     elif guider == "VanillaCFG":
-        scale = options.get("cfg_scale", 5.0)
+        scale = options.get("cfg_scale", 9.0)
         guider_config = {
             "target": "sgm.modules.diffusionmodules.guiders.VanillaCFG",
             "params": {
