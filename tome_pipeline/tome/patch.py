@@ -111,6 +111,22 @@ def make_tome_block(block_class: Type[torch.nn.Module]) -> Type[torch.nn.Module]
             self._cache.step += 1
             return x
 
+            # if x.shape[1] == 4096:
+            #     x_a = self.attn1(self.norm1(x[:, :1024, :]), context=None)
+            #     x = torch.cat((x_a, x_a, x_a, x_a), dim=1) + x
+            #
+            #     x = self.attn2(self.norm2(x), context=context) + x
+            #     x = self.ff(self.norm3(x)) + x
+            #
+            # else:
+            #     x_a = self.attn1(self.norm1(x[:, :256, :]), context=None)
+            #     x = torch.cat((x_a, x_a, x_a, x_a), dim=1) + x
+            #
+            #     x = self.attn2(self.norm2(x), context=context) + x
+            #     x = self.ff(self.norm3(x)) + x
+            #
+            # return x
+
     return ToMeBlock
 
 

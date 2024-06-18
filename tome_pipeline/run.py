@@ -180,6 +180,8 @@ def multi_sampling(args, model, sampler, prompts, filter=None,
 
         if tome_ratio > 0.0:
             model = improved_tome.reset_cache(model)
+        # todo: fix seeding issue in cache merge
+        seed_everything(args.seed)
 
     return total_samples, total_runtime
 
@@ -282,7 +284,7 @@ def main():
 
     # == Token Merging Configuration == #
     parser.add_argument("--experiment-folder", type=str, default="output/inference")
-    parser.add_argument("--tome-ratios", type=lambda s: [float(item) for item in s.split(',')], default=[0.0, 0.25, 0.5, 0.75], help="Token merging ratio")
+    parser.add_argument("--tome-ratios", type=lambda s: [float(item) for item in s.split(',')], default=[0, 0.5, 0.75], help="Token merging ratio")
 
     # == Improvements == #
     parser.add_argument("--semi-rand-schedule", action=argparse.BooleanOptionalAction, type=bool, default=False)
