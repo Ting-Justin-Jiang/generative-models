@@ -1,9 +1,10 @@
 DEBUG_MODE: bool = True
 import torch
 import math
-import tome.merge as merge
 from typing import Type, Dict, Any, Tuple, Callable
-from tomesd.utils import isinstance_str, init_generator
+
+from . import merge
+from .utils import isinstance_str, init_generator
 
 
 

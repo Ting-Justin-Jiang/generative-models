@@ -268,10 +268,12 @@ def init_and_sampling(args, sampler, prompts, tome_ratio=0.0):
 def main():
     parser = argparse.ArgumentParser(description="Generate images with Stable Diffusion XL base.")
 
+    # == Model Configuration == #
     parser.add_argument("--version", choices=VERSION2SPECS.keys(), default="SDXL-base-1.0", help="Model version to use.")
     parser.add_argument("--n_steps", type=int, default=50, help="Number of sampling steps.")
     parser.add_argument("--seed", type=int, default=0, help="Seed for random number generation.")
 
+    # == Sampling Configuration == #
     parser.add_argument("--sampler", default="EulerEDMSampler", help="Sampler configuration.")
     parser.add_argument("--discretization", default="LegacyDDPMDiscretization", help="Discretization configuration.")
     parser.add_argument("--guider", default="VanillaCFG", help="Guider configuration.")
@@ -280,11 +282,11 @@ def main():
 
     # == Token Merging Configuration == #
     parser.add_argument("--experiment-folder", type=str, default="output/inference")
-    parser.add_argument("--tome_ratios", type=list, default=[0.0, 0.5, 0.75], help="Token merging ratio")
+    parser.add_argument("--tome-ratios", type=lambda s: [float(item) for item in s.split(',')], default=[0.0, 0.25, 0.5, 0.75], help="Token merging ratio")
 
     # == Improvements == #
-    parser.add_argument("--semi-rand-schedule", action=argparse.BooleanOptionalAction, type=bool, default=True)
-    parser.add_argument("--unmerge-residual", action=argparse.BooleanOptionalAction, type=bool, default=True)
+    parser.add_argument("--semi-rand-schedule", action=argparse.BooleanOptionalAction, type=bool, default=False)
+    parser.add_argument("--unmerge-residual", action=argparse.BooleanOptionalAction, type=bool, default=False)
     parser.add_argument("--push-unmerged", action=argparse.BooleanOptionalAction, type=bool, default=False)
     parser.add_argument("--partial-attention", action=argparse.BooleanOptionalAction, type=bool, default=False)
 
